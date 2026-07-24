@@ -1,0 +1,21 @@
+WireForm third-party notices
+============================
+
+WireForm includes source, wheels, WebAssembly, or bundled JavaScript from:
+
+- WireViz 0.4.1 — GPL-3.0-only
+- Python graphviz 0.20.3 — MIT
+- Pyodide 0.29.3 — MPL-2.0
+- Viz.js 3.23.0 — MIT
+- Graphviz 14.1.0, embedded by Viz.js — EPL-1.0
+- Expat 2.7.3, embedded by Viz.js — MIT
+- React and React DOM 19.2.8 — MIT
+- Lucide React 0.468.0 — ISC
+- YAML 2.9.0 — ISC
+
+The complete license texts are in the adjacent vendor/licenses/ directory.
+Source links, artifact provenance, and checksums are available in the WireForm
+source repository's THIRD_PARTY_NOTICES.md and vendor/manifest.json files.
+
+WireForm itself is Copyright (C) 2026 Garth Benson and is distributed under
+GPL-3.0-only.

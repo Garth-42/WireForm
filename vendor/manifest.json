@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-23",
+  "components": [
+    {
+      "name": "WireViz",
+      "version": "0.4.1",
+      "source": "https://github.com/wireviz/WireViz/releases/tag/v0.4.1",
+      "artifact": "public/vendor/wheels/wireviz-0.4.1-py3-none-any.whl",
+      "sha256": "5dfdfec91e5d26e4f27f0f9d031672da7fb3c133d127167d233f4742f01873a2",
+      "license": "GPL-3.0-only"
+    },
+    {
+      "name": "Python graphviz",
+      "version": "0.20.3",
+      "source": "https://pypi.org/project/graphviz/0.20.3/",
+      "artifact": "public/vendor/wheels/graphviz-0.20.3-py3-none-any.whl",
+      "sha256": "81f848f2904515d8cd359cc611faba817598d2feaac4027b266aa3eda7b3dde5",
+      "license": "MIT"
+    },
+    {
+      "name": "Pyodide",
+      "version": "0.29.3",
+      "source": "https://github.com/pyodide/pyodide/tree/0.29.3",
+      "artifacts": {
+        "public/vendor/pyodide/pyodide-lock.json": "3256ffc76388de0e37f4b34d42ab484268d1afc675179ff97b2a5bb14f84ccac",
+        "public/vendor/pyodide/pyodide.asm.js": "1263f02b5b26099b96112378156f242dd98b39a8201ba7765e5fe3d455c5ce91",
+        "public/vendor/pyodide/pyodide.asm.wasm": "e2f4ee75b325e35eb31bfb8c613d4dd5098f5502c156a97847686875b5025480",
+        "public/vendor/pyodide/pyodide.js": "718d40f1c015dd25ec724cc8fc4e2325d6a45a92ae225121ff6953f224a16f72",
+        "public/vendor/pyodide/pyodide.mjs": "23213d27e9dacbda6f25f955fb38dabfc40ada082c04ee253047ea5dddcaa3b5",
+        "public/vendor/pyodide/python_stdlib.zip": "4298b6ee445cb724c3973437da47789752b9e6ff4e26619026b283ec801fc46b"
+      },
+      "license": "MPL-2.0"
+    },
+    {
+      "name": "Viz.js",
+      "version": "3.23.0",
+      "source": "https://github.com/mdaines/viz-js/tree/v3",
+      "license": "MIT",
+      "embeddedComponents": [
+        {
+          "name": "Graphviz",
+          "version": "14.1.0",
+          "source": "https://gitlab.com/graphviz/graphviz/-/tree/14.1.0",
+          "sha256": "094e87ed6946ff71f5d27cd754d46bd62429ac7ff3ca20b5648a3977c62df556",
+          "license": "EPL-1.0"
+        },
+        {
+          "name": "Expat",
+          "version": "2.7.3",
+          "source": "https://github.com/libexpat/libexpat/tree/R_2_7_3",
+          "sha256": "821ac9710d2c073eaf13e1b1895a9c9aa66c1157a99635c639fbff65cdbdd732",
+          "license": "MIT"
+        }
+      ]
+    }
+  ]
+}
