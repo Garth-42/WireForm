@@ -16,10 +16,15 @@ import {
   ClipboardPaste,
   Combine,
   Copy,
+  Database,
   Download,
   Eye,
   FileCode2,
+  FilePlus2,
+  FileUp,
+  FolderOpen,
   GitBranch,
+  ImagePlus,
   Library,
   Link2,
   LoaderCircle,
@@ -28,6 +33,7 @@ import {
   Plus,
   Redo2,
   RotateCcw,
+  Save,
   Shield,
   Trash2,
   Undo2,
@@ -37,61 +43,48 @@ import {
   ZoomOut,
 } from "lucide-react";
 import YAML from "yaml";
+import { prepareConnectorPhoto } from "./images";
+import {
+  componentToTemplate,
+  createLibrary,
+  createLibraryCollection,
+  instantiateTemplate,
+  mergeTemplates,
+  normalizeLibraryCollection,
+  parseLibraryFile,
+  serializeLibrary,
+  serializeLibraryBackup,
+  serializeTemplateSelection,
+  type ComponentTemplate,
+  type DuplicateMode,
+  type LibraryCollection,
+} from "./library";
+import {
+  CABLE_KINDS,
+  CONNECTOR_KINDS,
+  PROJECT_SCHEMA_VERSION,
+  componentGroup,
+  createEmptyProject,
+  makeComponent,
+  parseProjectFile,
+  serializeProjectFile,
+  type ComponentKind,
+  type HarnessComponent,
+  type HarnessProject,
+  type PortRef,
+  type TopologyLink,
+} from "./model";
+import {
+  AUTOSAVE_KEY,
+  LIBRARIES_KEY,
+  readLocalDocument,
+  writeLocalDocument,
+} from "./storage";
 import { WIREVIZ_VERSION } from "./vendor";
-
-type ComponentKind =
-  | "connector"
-  | "cable"
-  | "wire"
-  | "bundle"
-  | "splice"
-  | "junction";
-
-type PortSide = "left" | "right";
-
-interface HarnessComponent {
-  id: string;
-  kind: ComponentKind;
-  designator: string;
-  name: string;
-  x: number;
-  y: number;
-  pinCount: number;
-  wireCount: number;
-  pinLabels: string[];
-  wireLabels: string[];
-  colors: string[];
-  gauge: string;
-  length: string;
-  shield: boolean;
-  loops: string;
-  manufacturer: string;
-  mpn: string;
-  supplier: string;
-  spn: string;
-  notes: string;
-}
-
-interface PortRef {
-  nodeId: string;
-  portId: string;
-  side: PortSide;
-}
-
-interface TopologyLink {
-  id: string;
-  from: PortRef;
-  to: PortRef;
-}
-
-interface HarnessProject {
-  schemaVersion: 1;
-  title: string;
-  revision: string;
-  company: string;
-  components: HarnessComponent[];
-  links: TopologyLink[];
-}
+import {
+  importWireVizYaml,
+  type WireVizImportCandidate,
+} from "./wireviz-import";
 
 interface ValidationResult {
   errors: string[];
@@ -132,15 +125,10 @@ interface PreviewMessage {
   message?: string;
 }
 
-const CONNECTOR_KINDS: ComponentKind[] = [
-  "connector",
-  "splice",
-  "junction",
-];
-const CABLE_KINDS: ComponentKind[] = ["cable", "wire", "bundle"];
 const NODE_WIDTH = 224;
 const NODE_HEADER = 62;
 const ROW_HEIGHT = 32;
+const NODE_PHOTO_HEIGHT = 118;
 const CANVAS_WIDTH = 1480;
 const CANVAS_HEIGHT = 820;
 
@@ -309,7 +297,8 @@ function createStarterProject(): HarnessProject {
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+    projectId: "project-starter",
     title: "CAN Sensor Harness",
     revision: "A",
     company: "",
@@ -320,10 +309,6 @@ function createStarterProject(): HarnessProject {
 
 function cloneProject(project: HarnessProject): HarnessProject {
   return structuredClone(project);
-}
-
-function componentGroup(kind: ComponentKind): "connector" | "cable" {
-  return CONNECTOR_KINDS.includes(kind) ? "connector" : "cable";
 }
 
 function listForCount(values: string[], count: number, fallback: string) {
@@ -349,7 +334,12 @@ function getNodeRows(node: HarnessComponent) {
 }
 
 function getNodeHeight(node: HarnessComponent) {
-  return NODE_HEADER + Math.max(getNodeRows(node), 1) * ROW_HEIGHT + 12;
+  return (
+    NODE_HEADER +
+    (node.photo ? NODE_PHOTO_HEIGHT : 0) +
+    Math.max(getNodeRows(node), 1) * ROW_HEIGHT +
+    12
+  );
 }
 
 function parsePortNumber(portId: string) {
@@ -369,7 +359,12 @@ function nodePoint(node: HarnessComponent, port: PortRef) {
   const index = isShield ? node.wireCount : parsePortNumber(port.portId) - 1;
   return {
     x: node.x + (port.side === "right" ? NODE_WIDTH : 0),
-    y: node.y + NODE_HEADER + index * ROW_HEIGHT + ROW_HEIGHT / 2,
+    y:
+      node.y +
+      NODE_HEADER +
+      (node.photo ? NODE_PHOTO_HEIGHT : 0) +
+      index * ROW_HEIGHT +
+      ROW_HEIGHT / 2,
   };
 }
 
@@ -602,53 +597,8 @@ function validateProject(project: HarnessProject): ValidationResult {
 }
 
 function makeNode(kind: ComponentKind, index: number): HarnessComponent {
-  const counts: Record<ComponentKind, number> = {
-    connector: 4,
-    cable: 4,
-    wire: 1,
-    bundle: 4,
-    splice: 3,
-    junction: 4,
-  };
-  const prefixes: Record<ComponentKind, string> = {
-    connector: "J",
-    cable: "W",
-    wire: "W",
-    bundle: "W",
-    splice: "S",
-    junction: "N",
-  };
-  const count = counts[kind];
-  return {
-    id: `component-${Date.now().toString(36)}-${index}`,
-    kind,
-    designator: `${prefixes[kind]}${index}`,
-    name: KIND_META[kind].singular,
-    x: 260 + ((index * 53) % 540),
-    y: 110 + ((index * 47) % 390),
-    pinCount: CONNECTOR_KINDS.includes(kind) ? count : 0,
-    wireCount: CABLE_KINDS.includes(kind) ? count : 0,
-    pinLabels: CONNECTOR_KINDS.includes(kind)
-      ? Array.from({ length: count }, () => "")
-      : [],
-    wireLabels: CABLE_KINDS.includes(kind)
-      ? Array.from({ length: count }, () => "")
-      : [],
-    colors: CABLE_KINDS.includes(kind)
-      ? Array.from({ length: count }, (_, colorIndex) =>
-          ["RD", "BK", "WH", "GN"][colorIndex % 4],
-        )
-      : [],
-    gauge: CABLE_KINDS.includes(kind) ? "22 AWG" : "",
-    length: CABLE_KINDS.includes(kind) ? "1 m" : "",
-    shield: false,
-    loops: "",
-    manufacturer: "",
-    mpn: "",
-    supplier: "",
-    spn: "",
-    notes: "",
-  };
+  const node = makeComponent(kind, index);
+  return { ...node, name: KIND_META[kind].singular };
 }
 
 function csvValues(value: string) {
@@ -711,11 +661,29 @@ export function HarnessStudio() {
   const [drag, setDrag] = useState<DragState | null>(null);
   const [marquee, setMarquee] = useState<MarqueeState | null>(null);
   const [hasClipboard, setHasClipboard] = useState(false);
+  const [storageReady, setStorageReady] = useState(false);
+  const [autosaveStatus, setAutosaveStatus] = useState<
+    "loading" | "saving" | "saved" | "error"
+  >("loading");
+  const [dirty, setDirty] = useState(false);
+  const [libraries, setLibraries] = useState<LibraryCollection>(() =>
+    createLibraryCollection(),
+  );
+  const [librariesReady, setLibrariesReady] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [newLibraryName, setNewLibraryName] = useState("");
+  const [duplicateMode, setDuplicateMode] =
+    useState<DuplicateMode>("keep");
+  const [importCandidate, setImportCandidate] =
+    useState<WireVizImportCandidate | null>(null);
   const pastRef = useRef<HarnessProject[]>([]);
   const futureRef = useRef<HarnessProject[]>([]);
   const workerRef = useRef<Worker | null>(null);
   const previewRequestRef = useRef(0);
-  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const libraryInputRef = useRef<HTMLInputElement | null>(null);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
+  const yamlInputRef = useRef<HTMLInputElement | null>(null);
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
   const clipboardRef = useRef<ComponentClipboard | null>(null);
   const pasteSequenceRef = useRef(0);
   const dragDidMoveRef = useRef(false);
@@ -723,6 +691,10 @@ export function HarnessStudio() {
   const selected = project.components.find(
     (component) => component.id === selectedId,
   );
+  const activeLibrary =
+    libraries.libraries.find(
+      (library) => library.id === libraries.activeLibraryId,
+    ) ?? libraries.libraries[0];
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const validation = useMemo(() => validateProject(project), [project]);
   const wirevizDocument = useMemo(() => buildWireVizDocument(project), [project]);
@@ -737,6 +709,24 @@ export function HarnessStudio() {
       )}`,
     [wirevizDocument],
   );
+  const previewImages = useMemo(
+    () =>
+      project.components.flatMap((component) =>
+        component.kind === "connector" && component.photo
+          ? [
+              {
+                designator: component.designator,
+                dataUrl: component.photo.dataUrl,
+                mimeType: component.photo.mimeType,
+                width: component.photo.width,
+                height: component.photo.height,
+                caption: component.photo.alt,
+              },
+            ]
+          : [],
+      ),
+    [project.components],
+  );
 
   const commitProject = useCallback(
     (next: HarnessProject, message?: string) => {
@@ -745,6 +735,7 @@ export function HarnessStudio() {
       futureRef.current = [];
       setHistoryState({ canUndo: true, canRedo: false });
       setProject(next);
+      setDirty(true);
       if (message) setNotice(message);
     },
     [project],
@@ -764,6 +755,7 @@ export function HarnessStudio() {
     if (!previous) return;
     futureRef.current.push(cloneProject(project));
     setProject(previous);
+    setDirty(true);
     setHistoryState({
       canUndo: pastRef.current.length > 0,
       canRedo: true,
@@ -777,6 +769,7 @@ export function HarnessStudio() {
     if (!next) return;
     pastRef.current.push(cloneProject(project));
     setProject(next);
+    setDirty(true);
     setHistoryState({
       canUndo: true,
       canRedo: futureRef.current.length > 0,
@@ -878,6 +871,85 @@ export function HarnessStudio() {
     setSelectedId(pastedIds[0] ?? null);
     setPendingPort(null);
   }, [commitProject, project]);
+
+  const replaceProject = useCallback(
+    (next: HarnessProject, message: string, markDirty = false) => {
+      pastRef.current = [];
+      futureRef.current = [];
+      setHistoryState({ canUndo: false, canRedo: false });
+      setProject(next);
+      const firstId = next.components[0]?.id ?? null;
+      setSelectedId(firstId);
+      setSelectedIds(firstId ? [firstId] : []);
+      setPendingPort(null);
+      setDirty(markDirty);
+      setNotice(message);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let mounted = true;
+    void Promise.all([
+      readLocalDocument<string>(AUTOSAVE_KEY),
+      readLocalDocument<unknown>(LIBRARIES_KEY),
+    ]).then(([autosave, storedLibraries]) => {
+      if (!mounted) return;
+      if (autosave) {
+        try {
+          const restored = parseProjectFile(autosave);
+          replaceProject(
+            restored.project,
+            restored.migratedFrom
+              ? `Recovered the local autosave and migrated it from schema ${restored.migratedFrom}.`
+              : "Recovered the most recent local autosave.",
+          );
+        } catch {
+          setNotice(
+            "The local autosave could not be restored; the example harness was loaded.",
+          );
+        }
+      }
+      setLibraries(normalizeLibraryCollection(storedLibraries));
+      setStorageReady(true);
+      setLibrariesReady(true);
+      setAutosaveStatus("saved");
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [replaceProject]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    setAutosaveStatus("saving");
+    const timer = window.setTimeout(() => {
+      void writeLocalDocument(AUTOSAVE_KEY, serializeProjectFile(project))
+        .then(() => setAutosaveStatus("saved"))
+        .catch(() => setAutosaveStatus("error"));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [project, storageReady]);
+
+  useEffect(() => {
+    if (!librariesReady) return;
+    const timer = window.setTimeout(() => {
+      void writeLocalDocument(LIBRARIES_KEY, libraries).catch(() => {
+        setNotice("The user libraries could not be saved locally.");
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [libraries, librariesReady]);
+
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [dirty]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1002,10 +1074,11 @@ export function HarnessStudio() {
         requestId,
         assetBase: new URL(".", document.baseURI).href,
         document: wirevizDocument,
+        images: previewImages,
       });
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [wirevizDocument]);
+  }, [previewImages, wirevizDocument]);
 
   const updateSelected = (
     patch: Partial<HarnessComponent>,
@@ -1207,6 +1280,7 @@ export function HarnessStudio() {
       pastRef.current.push(drag.before);
       futureRef.current = [];
       setHistoryState({ canUndo: true, canRedo: false });
+      setDirty(true);
       setNotice(
         `Moved ${drag.ids.length} component${drag.ids.length === 1 ? "" : "s"}.`,
       );
@@ -1303,8 +1377,77 @@ export function HarnessStudio() {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = name;
+    document.body.append(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  const downloadProject = () => {
+    downloadText(
+      serializeProjectFile(project),
+      `${filenameFor(project.title)}.wireform.json`,
+      "application/json;charset=utf-8",
+    );
+    setDirty(false);
+    setNotice("Editable WireForm project downloaded.");
+  };
+
+  const openProjectFile = async (file: File) => {
+    try {
+      const parsed = parseProjectFile(await file.text());
+      if (
+        dirty &&
+        !window.confirm(
+          "Open this project and replace the current canvas? The current state remains in local autosave until the new project is applied.",
+        )
+      ) {
+        return;
+      }
+      replaceProject(
+        parsed.project,
+        parsed.migratedFrom
+          ? `Project opened and migrated from schema ${parsed.migratedFrom}.`
+          : "Editable WireForm project opened.",
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "The project could not be opened.",
+      );
+    } finally {
+      if (projectInputRef.current) projectInputRef.current.value = "";
+    }
+  };
+
+  const openWireVizYaml = async (file: File) => {
+    try {
+      const candidate = importWireVizYaml(await file.text(), file.name);
+      setImportCandidate(candidate);
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "The YAML import failed.",
+      );
+    } finally {
+      if (yamlInputRef.current) yamlInputRef.current.value = "";
+    }
+  };
+
+  const applyWireVizImport = () => {
+    if (!importCandidate) return;
+    if (
+      dirty &&
+      !window.confirm(
+        "Import this YAML and replace the current canvas? Download the current WireForm project first if you need a portable backup.",
+      )
+    ) {
+      return;
+    }
+    replaceProject(
+      importCandidate.project,
+      `Imported ${importCandidate.report.components} components and ${importCandidate.report.links} connections from WireViz YAML.`,
+      true,
+    );
+    setImportCandidate(null);
   };
 
   const downloadYaml = () => {
@@ -1320,91 +1463,254 @@ export function HarnessStudio() {
     setNotice("WireViz YAML downloaded.");
   };
 
-  const exportLibrary = () => {
-    const templates = project.components.map((component) =>
-      Object.fromEntries(
-        Object.entries(component).filter(
-          ([key]) => key !== "id" && key !== "x" && key !== "y",
-        ),
-      ),
+  const addSelectionToLibrary = () => {
+    if (!activeLibrary || selectedIds.length === 0) return;
+    const selectedSet = new Set(selectedIds);
+    const templates = project.components
+      .filter((component) => selectedSet.has(component.id))
+      .map((component) => componentToTemplate(component));
+    const next = structuredClone(libraries);
+    const library = next.libraries.find(
+      (candidate) => candidate.id === next.activeLibraryId,
     );
-    const library = {
-      format: "wireviz-gui-component-library",
-      schemaVersion: 1,
-      library: {
-        name: `${project.title} components`,
-        version: "1.0.0",
-      },
-      templates,
-    };
-    downloadText(
-      JSON.stringify(library, null, 2),
-      `${filenameFor(project.title)}.wireviz-library.json`,
-      "application/json;charset=utf-8",
+    const result = library
+      ? mergeTemplates(library, templates, duplicateMode)
+      : { added: 0, replaced: 0, skipped: templates.length };
+    setLibraries(next);
+    setNotice(
+      `Library updated: ${result.added} added, ${result.replaced} replaced, ${result.skipped} skipped.`,
     );
-    setNotice("Component library exported.");
   };
 
-  const importLibrary = async (file: File) => {
+  const downloadSelectedTemplates = () => {
+    if (selectedIds.length === 0) return;
+    const selectedSet = new Set(selectedIds);
+    const components = project.components.filter((component) =>
+      selectedSet.has(component.id),
+    );
+    downloadText(
+      serializeTemplateSelection(`${project.title} selection`, components),
+      `${filenameFor(project.title)}-selection.wireviz-library.json`,
+      "application/json;charset=utf-8",
+    );
+    setNotice("Selected component templates downloaded.");
+  };
+
+  const exportActiveLibrary = () => {
+    if (!activeLibrary) return;
+    downloadText(
+      serializeLibrary(activeLibrary),
+      `${filenameFor(activeLibrary.name)}.wireviz-library.json`,
+      "application/json;charset=utf-8",
+    );
+    setNotice(`Library "${activeLibrary.name}" downloaded.`);
+  };
+
+  const backupLibraries = () => {
+    downloadText(
+      serializeLibraryBackup(libraries),
+      "wireform-library-backup.json",
+      "application/json;charset=utf-8",
+    );
+    setNotice("All user libraries downloaded as a backup.");
+  };
+
+  const importLibraryFile = async (file: File) => {
     try {
-      if (file.size > 1_000_000) throw new Error("Library files must be under 1 MB.");
-      const parsed = JSON.parse(await file.text()) as {
-        format?: string;
-        schemaVersion?: number;
-        templates?: Array<Partial<HarnessComponent>>;
-      };
-      if (
-        parsed.format !== "wireviz-gui-component-library" ||
-        parsed.schemaVersion !== 1 ||
-        !Array.isArray(parsed.templates)
-      ) {
-        throw new Error("This is not a WireForm component library.");
-      }
-      const imported = parsed.templates.slice(0, 100).map((template, index) => {
-        const kind = template.kind;
-        if (!kind || !KIND_META[kind]) {
-          throw new Error("A component template has an unsupported type.");
+      const parsed = parseLibraryFile(await file.text());
+      if (parsed.kind === "backup") {
+        if (
+          !window.confirm(
+            "Restore this backup and replace all user libraries currently stored in this browser?",
+          )
+        ) {
+          return;
         }
-        const base = makeNode(kind, project.components.length + index + 1);
-        return {
-          ...base,
-          ...template,
-          id: `imported-${Date.now().toString(36)}-${index}`,
-          x: 240 + ((index * 58) % 620),
-          y: 95 + ((index * 52) % 420),
-        };
-      });
-      updateProject(
-        (draft) => {
-          const used = new Set(draft.components.map((node) => node.designator));
-          for (const node of imported) {
-            const base = node.designator || KIND_META[node.kind].label.charAt(0);
-            let designator = base;
-            let suffix = 2;
-            while (used.has(designator)) {
-              designator = `${base}_${suffix}`;
-              suffix += 1;
-            }
-            used.add(designator);
-            draft.components.push({ ...node, designator });
-          }
-        },
-        `Imported ${imported.length} component template${
-          imported.length === 1 ? "" : "s"
-        }.`,
+        setLibraries(parsed.collection);
+        setNotice(
+          `Restored ${parsed.collection.libraries.length} user libraries from backup.`,
+        );
+        return;
+      }
+      const next = structuredClone(libraries);
+      let library = next.libraries.find(
+        (candidate) => candidate.id === next.activeLibraryId,
+      );
+      if (!library) {
+        library = createLibrary(parsed.library.name);
+        next.libraries.push(library);
+        next.activeLibraryId = library.id;
+      }
+      const result = mergeTemplates(
+        library,
+        parsed.library.templates,
+        duplicateMode,
+      );
+      setLibraries(next);
+      setNotice(
+        `Library import complete: ${result.added} added, ${result.replaced} replaced, ${result.skipped} skipped.`,
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Library import failed.");
     } finally {
-      if (importInputRef.current) importInputRef.current.value = "";
+      if (libraryInputRef.current) libraryInputRef.current.value = "";
     }
   };
 
+  const createNamedLibrary = () => {
+    const name = newLibraryName.trim();
+    if (!name) {
+      setNotice("Enter a name for the new user library.");
+      return;
+    }
+    if (libraries.libraries.length >= 50) {
+      setNotice("A browser profile may contain at most 50 user libraries.");
+      return;
+    }
+    const library = createLibrary(name);
+    setLibraries((current) => ({
+      ...current,
+      activeLibraryId: library.id,
+      libraries: [...current.libraries, library],
+    }));
+    setNewLibraryName("");
+    setNotice(`Created user library "${library.name}".`);
+  };
+
+  const renameActiveLibrary = (name: string) => {
+    setLibraries((current) => {
+      const next = structuredClone(current);
+      const library = next.libraries.find(
+        (candidate) => candidate.id === next.activeLibraryId,
+      );
+      if (library) {
+        library.name = name.slice(0, 240);
+        library.updatedAt = new Date().toISOString();
+      }
+      return next;
+    });
+  };
+
+  const deleteActiveLibrary = () => {
+    if (!activeLibrary) return;
+    if (
+      !window.confirm(
+        `Delete "${activeLibrary.name}" and its ${activeLibrary.templates.length} templates from this browser?`,
+      )
+    ) {
+      return;
+    }
+    setLibraries((current) => {
+      const remaining = current.libraries.filter(
+        (library) => library.id !== current.activeLibraryId,
+      );
+      if (remaining.length === 0) remaining.push(createLibrary());
+      return {
+        ...current,
+        activeLibraryId: remaining[0].id,
+        libraries: remaining,
+      };
+    });
+    setNotice("User library deleted.");
+  };
+
+  const updateTemplateName = (templateId: string, name: string) => {
+    setLibraries((current) => {
+      const next = structuredClone(current);
+      const library = next.libraries.find(
+        (candidate) => candidate.id === next.activeLibraryId,
+      );
+      const template = library?.templates.find(
+        (candidate) => candidate.id === templateId,
+      );
+      if (template) {
+        template.name = name.slice(0, 240);
+        template.updatedAt = new Date().toISOString();
+      }
+      return next;
+    });
+  };
+
+  const removeTemplate = (templateId: string) => {
+    setLibraries((current) => {
+      const next = structuredClone(current);
+      const library = next.libraries.find(
+        (candidate) => candidate.id === next.activeLibraryId,
+      );
+      if (library) {
+        library.templates = library.templates.filter(
+          (template) => template.id !== templateId,
+        );
+        library.updatedAt = new Date().toISOString();
+      }
+      return next;
+    });
+    setNotice("Template removed from the user library.");
+  };
+
+  const addTemplateToCanvas = (template: ComponentTemplate) => {
+    const node = instantiateTemplate(template, project.components.length + 1);
+    const used = new Set(
+      project.components.map((component) => component.designator),
+    );
+    const base = node.designator || KIND_META[node.kind].label.charAt(0);
+    let designator = base;
+    let suffix = 2;
+    while (used.has(designator)) {
+      designator = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    node.designator = designator;
+    updateProject(
+      (draft) => {
+        draft.components.push(node);
+      },
+      `Added "${template.name}" from ${activeLibrary?.name ?? "the user library"}.`,
+    );
+    selectOnly(node.id);
+    setLibraryOpen(false);
+  };
+
+  const uploadConnectorPhoto = async (file: File) => {
+    if (!selected || selected.kind !== "connector") return;
+    try {
+      const photo = await prepareConnectorPhoto(
+        file,
+        `${selected.designator} ${selected.name}`.trim(),
+      );
+      updateSelected({ photo }, "Connector photo added to the canvas and preview.");
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "The photo could not be added.",
+      );
+    } finally {
+      if (photoInputRef.current) photoInputRef.current.value = "";
+    }
+  };
+
+  const newProject = () => {
+    if (
+      dirty &&
+      !window.confirm(
+        "Start a new harness? The current project remains in local autosave, but unsaved file changes will not be downloaded.",
+      )
+    ) {
+      return;
+    }
+    replaceProject(createEmptyProject(), "New empty harness created.", true);
+  };
+
   const resetProject = () => {
+    if (
+      dirty &&
+      !window.confirm(
+        "Restore the example harness and replace the current canvas?",
+      )
+    ) {
+      return;
+    }
     const next = createStarterProject();
-    commitProject(next, "Example harness restored.");
-    selectOnly("connector-controller");
-    setPendingPort(null);
+    replaceProject(next, "Example harness restored.", true);
   };
 
   const previewDataUri = previewSvg
@@ -1438,9 +1744,54 @@ export function HarnessStudio() {
             />
           </label>
           <span className="revision-chip">REV {project.revision || "—"}</span>
+          <span
+            className={`autosave-chip autosave-${autosaveStatus}`}
+            title="Projects are autosaved in this browser"
+          >
+            <Database size={11} />
+            {autosaveStatus === "loading"
+              ? "Loading"
+              : autosaveStatus === "saving"
+                ? "Saving"
+                : autosaveStatus === "error"
+                  ? "Autosave error"
+                  : "Saved locally"}
+          </span>
         </div>
 
         <div className="top-actions">
+          <button
+            className="icon-button"
+            onClick={newProject}
+            aria-label="New empty project"
+            title="New empty project"
+          >
+            <FilePlus2 size={16} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={() => projectInputRef.current?.click()}
+            aria-label="Open WireForm project"
+            title="Open editable WireForm project"
+          >
+            <FolderOpen size={16} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={downloadProject}
+            aria-label="Save WireForm project"
+            title="Download editable WireForm project"
+          >
+            <Save size={16} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={() => yamlInputRef.current?.click()}
+            aria-label="Import WireViz YAML"
+            title="Import existing WireViz YAML"
+          >
+            <FileUp size={16} />
+          </button>
           <button
             className="icon-button"
             onClick={undo}
@@ -1504,6 +1855,26 @@ export function HarnessStudio() {
             <Download size={16} />
             Download YAML
           </button>
+          <input
+            ref={projectInputRef}
+            type="file"
+            accept=".json,.wireform.json"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void openProjectFile(file);
+            }}
+          />
+          <input
+            ref={yamlInputRef}
+            type="file"
+            accept=".yaml,.yml,application/yaml,text/yaml"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void openWireVizYaml(file);
+            }}
+          />
         </div>
       </header>
 
@@ -1547,29 +1918,25 @@ export function HarnessStudio() {
           <div className="library-card">
             <div className="library-title">
               <Library size={16} />
-              <strong>Component library</strong>
+              <strong>User libraries</strong>
             </div>
-            <p>Reuse the generic parts in this harness in another session.</p>
+            <p>
+              {activeLibrary?.name ?? "My Components"} ·{" "}
+              {activeLibrary?.templates.length ?? 0} templates
+            </p>
             <div className="library-actions">
-              <button onClick={() => importInputRef.current?.click()}>
-                <Upload size={14} />
-                Import
+              <button onClick={() => setLibraryOpen(true)}>
+                <Library size={14} />
+                Manage
               </button>
-              <button onClick={exportLibrary}>
-                <Download size={14} />
-                Export
+              <button
+                onClick={addSelectionToLibrary}
+                disabled={selectedIds.length === 0}
+              >
+                <Plus size={14} />
+                Add selected
               </button>
             </div>
-            <input
-              ref={importInputRef}
-              type="file"
-              accept=".json,.wireviz-library.json"
-              hidden
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void importLibrary(file);
-              }}
-            />
           </div>
 
           <button className="reset-link" onClick={resetProject}>
@@ -1762,6 +2129,15 @@ export function HarnessStudio() {
                         </div>
                         <span className="node-kind-label">{meta.label}</span>
                       </div>
+                      {node.photo && (
+                        <div className="node-photo">
+                          <img
+                            src={node.photo.dataUrl}
+                            alt={node.photo.alt}
+                            draggable={false}
+                          />
+                        </div>
+                      )}
                       <div className="node-rows">
                         {Array.from({ length: Math.max(rows, 1) }, (_, index) => {
                           const isShield =
@@ -2017,6 +2393,10 @@ export function HarnessStudio() {
                               componentGroup(selected.kind);
                             updateSelected({
                               kind,
+                              photo:
+                                kind === "connector"
+                                  ? selected.photo
+                                  : undefined,
                               pinCount: CONNECTOR_KINDS.includes(kind)
                                 ? changingGroup
                                   ? 4
@@ -2053,6 +2433,75 @@ export function HarnessStudio() {
                     />
                   </Field>
                 </div>
+
+                {selected.kind === "connector" && (
+                  <div className="property-section">
+                    <h3>Connector photo</h3>
+                    {selected.photo ? (
+                      <div className="photo-editor">
+                        <img
+                          src={selected.photo.dataUrl}
+                          alt={selected.photo.alt}
+                        />
+                        <Field label="Alternative text">
+                          <input
+                            value={selected.photo.alt}
+                            onChange={(event) =>
+                              updateSelected({
+                                photo: {
+                                  ...selected.photo!,
+                                  alt: event.target.value,
+                                },
+                              })
+                            }
+                          />
+                        </Field>
+                        <div className="photo-actions">
+                          <button onClick={() => photoInputRef.current?.click()}>
+                            <ImagePlus size={14} />
+                            Replace
+                          </button>
+                          <button
+                            className="danger"
+                            onClick={() =>
+                              updateSelected(
+                                { photo: undefined },
+                                "Connector photo removed.",
+                              )
+                            }
+                          >
+                            <Trash2 size={14} />
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        className="photo-upload"
+                        onClick={() => photoInputRef.current?.click()}
+                      >
+                        <ImagePlus size={20} />
+                        <strong>Upload connector photo</strong>
+                        <span>JPEG, PNG, or WebP · resized locally</span>
+                      </button>
+                    )}
+                    <input
+                      ref={photoInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      hidden
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void uploadConnectorPhoto(file);
+                      }}
+                    />
+                    <p className="photo-note">
+                      Embedded in WireForm projects, libraries, the topology
+                      canvas, and the local WireViz preview. YAML downloads do
+                      not include binary image data.
+                    </p>
+                  </div>
+                )}
 
                 <div className="property-section">
                   <h3>
@@ -2371,6 +2820,299 @@ export function HarnessStudio() {
           </div>
         )}
       </section>
+
+      {importCandidate && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setImportCandidate(null);
+          }}
+        >
+          <section
+            className="modal import-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="yaml-import-title"
+          >
+            <div className="modal-header">
+              <div>
+                <span className="eyebrow">Compatibility report</span>
+                <h2 id="yaml-import-title">Import WireViz YAML</h2>
+              </div>
+              <button
+                className="modal-close"
+                onClick={() => setImportCandidate(null)}
+                aria-label="Close import report"
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <div className="import-summary">
+              <div>
+                <strong>{importCandidate.report.components}</strong>
+                <span>components</span>
+              </div>
+              <div>
+                <strong>{importCandidate.report.links}</strong>
+                <span>connections</span>
+              </div>
+              <div>
+                <strong>{importCandidate.report.warnings.length}</strong>
+                <span>warnings</span>
+              </div>
+              <div>
+                <strong>{importCandidate.report.unsupported.length}</strong>
+                <span>unsupported</span>
+              </div>
+            </div>
+            <div className="modal-body import-report">
+              <p>
+                This creates a new editable WireForm project. YAML comments,
+                aliases, formatting, and unsupported fields are not preserved.
+              </p>
+              {importCandidate.report.warnings.length > 0 && (
+                <section>
+                  <h3>Warnings</h3>
+                  <ul>
+                    {importCandidate.report.warnings.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {importCandidate.report.unsupported.length > 0 && (
+                <section className="unsupported-report">
+                  <h3>Not represented in the visual editor</h3>
+                  <ul>
+                    {importCandidate.report.unsupported.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button
+                className="secondary-button"
+                onClick={() => setImportCandidate(null)}
+              >
+                Cancel
+              </button>
+              <button className="primary-button" onClick={applyWireVizImport}>
+                <FileUp size={15} />
+                Import project
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {libraryOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setLibraryOpen(false);
+          }}
+        >
+          <section
+            className="modal library-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="library-manager-title"
+          >
+            <div className="modal-header">
+              <div>
+                <span className="eyebrow">Stored in this browser</span>
+                <h2 id="library-manager-title">User library manager</h2>
+              </div>
+              <button
+                className="modal-close"
+                onClick={() => setLibraryOpen(false)}
+                aria-label="Close library manager"
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <div className="library-manager-toolbar">
+              <label>
+                <span>Active library</span>
+                <select
+                  value={libraries.activeLibraryId}
+                  onChange={(event) =>
+                    setLibraries((current) => ({
+                      ...current,
+                      activeLibraryId: event.target.value,
+                    }))
+                  }
+                >
+                  {libraries.libraries.map((library) => (
+                    <option key={library.id} value={library.id}>
+                      {library.name} ({library.templates.length})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Duplicate handling</span>
+                <select
+                  value={duplicateMode}
+                  onChange={(event) =>
+                    setDuplicateMode(event.target.value as DuplicateMode)
+                  }
+                >
+                  <option value="keep">Keep both</option>
+                  <option value="replace">Replace existing</option>
+                  <option value="skip">Skip duplicate</option>
+                </select>
+              </label>
+              <div className="new-library">
+                <label>
+                  <span>New library</span>
+                  <input
+                    value={newLibraryName}
+                    onChange={(event) => setNewLibraryName(event.target.value)}
+                    placeholder="Library name"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") createNamedLibrary();
+                    }}
+                  />
+                </label>
+                <button onClick={createNamedLibrary} aria-label="Create library">
+                  <Plus size={16} />
+                </button>
+              </div>
+            </div>
+            <div className="library-file-actions">
+              <button
+                onClick={addSelectionToLibrary}
+                disabled={selectedIds.length === 0}
+              >
+                <Plus size={14} />
+                Save selection
+              </button>
+              <button
+                onClick={downloadSelectedTemplates}
+                disabled={selectedIds.length === 0}
+              >
+                <Download size={14} />
+                Download selection
+              </button>
+              <button onClick={() => libraryInputRef.current?.click()}>
+                <Upload size={14} />
+                Import / restore
+              </button>
+              <button onClick={exportActiveLibrary}>
+                <Download size={14} />
+                Export library
+              </button>
+              <button onClick={backupLibraries}>
+                <Database size={14} />
+                Backup all
+              </button>
+              <input
+                ref={libraryInputRef}
+                type="file"
+                accept=".json,.wireviz-library.json"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void importLibraryFile(file);
+                }}
+              />
+            </div>
+            <div className="active-library-heading">
+              <label>
+                <span>Library name</span>
+                <input
+                  value={activeLibrary?.name ?? ""}
+                  onChange={(event) => renameActiveLibrary(event.target.value)}
+                />
+              </label>
+              <button
+                className="danger-button"
+                onClick={deleteActiveLibrary}
+                title="Delete active library"
+              >
+                <Trash2 size={14} />
+                Delete library
+              </button>
+            </div>
+            <div className="template-list">
+              {activeLibrary && activeLibrary.templates.length > 0 ? (
+                activeLibrary.templates.map((template) => (
+                  <article className="template-card" key={template.id}>
+                    <div className="template-thumbnail">
+                      {template.component.photo ? (
+                        <img
+                          src={template.component.photo.dataUrl}
+                          alt={template.component.photo.alt}
+                        />
+                      ) : (
+                        (() => {
+                          const Icon = KIND_META[template.component.kind].icon;
+                          return <Icon size={20} />;
+                        })()
+                      )}
+                    </div>
+                    <div className="template-details">
+                      <input
+                        value={template.name}
+                        onChange={(event) =>
+                          updateTemplateName(template.id, event.target.value)
+                        }
+                        aria-label="Template name"
+                      />
+                      <span>
+                        {KIND_META[template.component.kind].label} ·{" "}
+                        {template.component.manufacturer || "Generic"}
+                        {template.component.mpn
+                          ? ` · ${template.component.mpn}`
+                          : ""}
+                      </span>
+                    </div>
+                    <button
+                      className="template-add"
+                      onClick={() => addTemplateToCanvas(template)}
+                    >
+                      <Plus size={14} />
+                      Add
+                    </button>
+                    <button
+                      className="template-delete"
+                      onClick={() => removeTemplate(template.id)}
+                      aria-label={`Delete ${template.name}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <div className="library-empty">
+                  <Library size={26} />
+                  <strong>This library is empty</strong>
+                  <span>
+                    Select components on the canvas and choose Save selection.
+                  </span>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer library-footer">
+              <span>
+                {activeLibrary?.templates.length ?? 0} templates · photos are
+                embedded in exports
+              </span>
+              <button
+                className="secondary-button"
+                onClick={() => setLibraryOpen(false)}
+              >
+                Done
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       <div className="desktop-notice">
         <Cable size={28} />

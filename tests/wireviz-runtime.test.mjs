@@ -32,10 +32,30 @@ sys.modules["yaml"] = yaml_module
 from wireviz.wireviz import parse as wireviz_parse
 `);
 
+    const imagePath = "/wireform-images/test.png";
+    const imageDataUrl =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA";
+    pyodide.FS.mkdirTree("/wireform-images");
+    pyodide.FS.writeFile(
+      imagePath,
+      new Uint8Array(Buffer.from(imageDataUrl.split(",")[1], "base64")),
+    );
+
     const document = {
       metadata: { title: "Runtime smoke test", revision: "A" },
       connectors: {
-        J1: { type: "Source", pincount: 2, pinlabels: ["PWR", "GND"] },
+        J1: {
+          type: "Source",
+          pincount: 2,
+          pinlabels: ["PWR", "GND"],
+          image: {
+            src: imagePath,
+            width: 80,
+            height: 60,
+            scale: "both",
+            fixedsize: false,
+          },
+        },
         J2: { type: "Load", pincount: 2, pinlabels: ["PWR", "GND"] },
       },
       cables: {
@@ -66,10 +86,16 @@ harness.graph.source
     assert.match(dot, /POWER/);
 
     const viz = await instance();
-    const svg = viz.renderString(dot, { engine: "dot", format: "svg" });
+    let svg = viz.renderString(dot, {
+      engine: "dot",
+      format: "svg",
+      images: [{ name: imagePath, width: 80, height: 60 }],
+    });
+    svg = svg.split(imagePath).join(imageDataUrl);
     assert.match(svg, /<svg\b/);
     assert.match(svg, />J1</);
     assert.match(svg, />W1</);
+    assert.match(svg, /data:image\/png;base64/);
 
     pythonDocument.destroy?.();
   },
