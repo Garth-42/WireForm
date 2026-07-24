@@ -10,6 +10,15 @@ updates:
         dependency-type: production
       development-dependencies:
         dependency-type: development
+    ignore:
+      # This package intentionally matches the vendored browser runtime and is
+      # updated only through the verified vendoring process.
+      - dependency-name: pyodide
+      # Keep compiler and Node types aligned with the supported toolchain.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
