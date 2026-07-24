@@ -25,8 +25,8 @@
     "vendor:verify": "node scripts/verify-vendor.mjs"
   },
   "dependencies": {
-    "@viz-js/viz": "3.23.0",
-    "lucide-react": "0.468.0",
+    "@viz-js/viz": "3.28.0",
+    "lucide-react": "1.26.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "yaml": "2.9.0"
