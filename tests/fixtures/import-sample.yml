@@ -1,0 +1,31 @@
+metadata:
+  title: Browser Import QA
+  revision: D
+  company: WireForm
+
+connectors:
+  P1:
+    type: Power input
+    pincount: 2
+    pinlabels: [VIN, GND]
+  P2:
+    type: Power output
+    pincount: 2
+
+cables:
+  W1:
+    type: Power pair
+    wirecount: 2
+    colors: [RD, BK]
+    wirelabels: [VIN, GND]
+    gauge: 18 AWG
+    length: 0.5 m
+
+connections:
+  - - P1: [1, 2]
+    - W1: [1, 2]
+    - P2: [1, 2]
+
+additional_bom_items:
+  - description: Cable tie
+    qty: 2

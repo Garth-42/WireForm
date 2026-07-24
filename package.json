@@ -1,6 +1,6 @@
 {
   "name": "wireform",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "GPL-3.0-only",
   "author": "Garth Benson",
@@ -19,7 +19,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "npm run build && node --test tests/static-build.test.mjs tests/wireviz-runtime.test.mjs",
+    "test": "npm run build && node --experimental-strip-types --test tests/static-build.test.mjs tests/project-data.test.mjs tests/wireviz-runtime.test.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "vendor:verify": "node scripts/verify-vendor.mjs"

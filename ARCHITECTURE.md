@@ -1,6 +1,6 @@
 # WireViz GUI Architecture
 
-**Status:** Implemented MVP
+**Status:** Implemented v0.2
 **Date:** 2026-07-23
 **Initial target:** WireViz 0.4.1
 **Deployment target:** Static GitHub Pages site
@@ -19,11 +19,11 @@ The following decisions are confirmed for the initial release:
 | Area | Initial decision | Future direction |
 |---|---|---|
 | Editor | Visual canvas with property inspector | Add a synchronized wire-list/table editor |
-| YAML | Generate and download new WireViz YAML | Import and edit existing YAML |
+| YAML | Generate, download, and import existing WireViz YAML with a compatibility report | Expand preservation of less-common upstream features |
 | Preview | Run vendored WireViz in WebAssembly and render in-browser | Continue tracking upstream WireViz compatibility |
 | Harness scope | Connectors, wires, cables, bundles, splices, junctions, shields, loops/jumpers, labels, colors, BOM fields, and metadata | Add less-common upstream features as needed |
-| Component library | Generic and user-authored components; library import/export | Curated manufacturer libraries |
-| Project storage | Current browser session plus YAML download | Project files, autosave, IndexedDB, and local file access |
+| Component library | Persistent named user libraries, template management, duplicate policies, and import/export/backup | Curated manufacturer libraries |
+| Project storage | Versioned project files, schema migration, IndexedDB autosave, and recovery | Optional native local-file handles |
 | GitHub | GitHub Pages deployment only | Optional repository integration |
 | Offline | Not required | Installable offline PWA |
 | Devices | Desktop only | Tablet and responsive/mobile support |
@@ -47,10 +47,9 @@ The initial release must:
 
 The initial release will not:
 
-- Import arbitrary WireViz YAML.
 - Preserve YAML comments, anchors, aliases, templates, or hand-authored formatting.
-- Save or reopen full editor projects.
-- Autosave to browser storage.
+- Guarantee lossless import of every WireViz field; unsupported constructs are
+  reported before the visual project is applied.
 - Integrate directly with GitHub repositories.
 - Include real manufacturer connector catalogs.
 - Provide real-time pricing, quoting, ordering, or inventory.
@@ -59,7 +58,11 @@ The initial release will not:
 - Run the normal WireViz CLI or a native GraphViz executable on the user's machine.
 - Guarantee that the visual canvas layout will match the auto-layout of the WireViz preview.
 
-Because project import and persistence are deferred, refreshing or closing the initial application can discard the editable canvas state. The UI must make this limitation clear before destructive navigation and make YAML download prominent. Downloaded YAML is a valid WireViz artifact, but it will not be re-importable until the future YAML-import feature is implemented.
+Editable project files use a versioned WireForm JSON format, while IndexedDB
+holds the most recent autosave and named user libraries. YAML remains the
+interchange format with WireViz, but its import is intentionally compatibility
+gated because the visual model cannot preserve arbitrary comments, aliases,
+templates, formatting, Graphviz tweaks, or every upstream extension.
 
 ## 5. Architecture drivers
 
@@ -685,17 +688,25 @@ Playwright covers:
 
 **Exit criterion:** production acceptance criteria pass on supported desktop browsers.
 
+### Implemented follow-up phase
+
+- Versioned project save/open, schema-1 migration, IndexedDB autosave, recovery,
+  and unsaved-file navigation protection.
+- Existing YAML import with a compatibility report and safe apply step.
+- Persistent named user libraries with per-template management, selected
+  export, duplicate handling, and full backup/restore.
+- Connector photos embedded in project/library files and rendered in the
+  topology canvas and WireViz/Graphviz preview.
+
 ### Future phases
 
 - Wire-list/table editor.
-- Full project save/open format and IndexedDB autosave.
-- Existing YAML import with a compatibility report and preservation strategy.
 - Controlled WireViz updater command with artifact verification, dependency and
   license review gates, compatibility tests, and update discovery. See the
   [WireViz updater integration plan](docs/plans/wireviz-updater.md).
 - GitHub repository integration.
 - Installable offline PWA.
-- Manufacturer connector libraries and images.
+- Manufacturer connector catalogs and distributable image packs.
 - Tablet/mobile interaction.
 
 ## 21. Initial acceptance criteria
@@ -710,7 +721,8 @@ The first public release is complete when:
 6. The in-browser preview is produced from vendored WireViz DOT, not from an unrelated diagram model.
 7. Equivalent project state produces byte-for-byte identical YAML.
 8. Generic component libraries can be imported and exported safely.
-9. The application makes the lack of project persistence explicit.
+9. Editable projects and user libraries survive reload without leaving the
+   browser, and can be downloaded for portable backup.
 10. The shipped application includes complete third-party notices and GPL-compliant source/build information.
 
 ## 22. Key risks and mitigations
@@ -722,7 +734,7 @@ The first public release is complete when:
 | Splice/junction behavior has no dedicated target primitive | Incorrect or confusing exports | Keep it first-class in the domain; use a versioned, golden-tested lowering adapter |
 | WireViz syntax changes | Existing compiler breaks | Pin an exact version, isolate adapters, maintain a compatibility corpus, and require the controlled updater review gates |
 | GPL obligations conflict with desired licensing | Release cannot proceed as planned | Retain GPL-3.0-only or obtain legal review/alternate implementation before changing licensing |
-| Initial YAML cannot restore the canvas | Users lose editable work | Prominent limitation messaging; prioritize project persistence/YAML import next |
+| YAML contains unsupported or lossy constructs | Imported visual project differs from its source | Present a compatibility report before applying; preserve the source file outside WireForm |
 | Malicious labels or libraries reach SVG | XSS or resource exhaustion | Runtime schemas, limits, Web Worker isolation, SVG sanitization, CSP |
 | Canvas and WireViz layouts differ | User confusion | Label canvas as topology editor and preview as generated documentation |
 | GitHub Pages subpath or caching issues | Runtime assets fail to load | Base-path tests, relative asset resolution, versioned filenames, deployment smoke test |
@@ -738,7 +750,9 @@ The following ADRs should be created when implementation begins:
 - ADR-005: Pin WireViz 0.4.1 and require compatibility tests for upgrades.
 - ADR-006: License the integrated application under GPL-3.0-only.
 - ADR-007: Use versioned JSON for reusable component libraries.
-- ADR-008: Defer project persistence and YAML import.
+- ADR-008: Use versioned project JSON, IndexedDB autosave, and compatibility-gated YAML import.
+- ADR-010: Embed normalized connector photos in project/library data and mount
+  them temporarily for the WireViz-to-Graphviz-WASM preview path.
 - ADR-009: Treat WireViz upgrades as verified vendoring changes rather than an
   automatically floating runtime dependency.
 

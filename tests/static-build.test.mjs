@@ -24,6 +24,16 @@ test("production build is a GitHub Pages-compatible static site", async () => {
   await Promise.all(
     assetPaths.map((path) => access(new URL(path.replace(/^\.\//, ""), distRoot))),
   );
+  const scriptPath = assetPaths.find((path) => path.endsWith(".js"));
+  assert.ok(scriptPath, "expected a bundled JavaScript entry");
+  const script = await readFile(
+    new URL(scriptPath.replace(/^\.\//, ""), distRoot),
+    "utf8",
+  );
+  assert.match(script, /User library manager/);
+  assert.match(script, /Import WireViz YAML/);
+  assert.match(script, /Connector photo/);
+  assert.match(script, /Saved locally/);
 
   await access(new URL("vendor/pyodide/pyodide.mjs", distRoot));
   await access(new URL("vendor/pyodide/pyodide.asm.wasm", distRoot));
