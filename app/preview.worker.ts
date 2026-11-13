@@ -50,6 +50,21 @@ let runtimePromise:
     }>
   | undefined;
 
+/**
+ * Python errors arrive as a full traceback whose first line is always
+ * "Traceback (most recent call last):". The useful part is the last line.
+ */
+function errorSummary(error: unknown) {
+  const fallback = "WireViz could not render this harness.";
+  if (!(error instanceof Error)) return fallback;
+  const lines = error.message
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const last = lines.at(-1) ?? "";
+  return last.replace(/^(?:Exception|[A-Za-z_.]*Error):\s*/, "") || fallback;
+}
+
 function dataUrlBytes(dataUrl: string) {
   const match = /^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/=\s]+)$/.exec(
     dataUrl,
@@ -166,6 +181,11 @@ from wireviz.wireviz import parse as wireviz_parse
     });
     return { pyodide, viz };
   })();
+  // A failed start (for example a dropped download) must not be cached, or
+  // every later render would fail until the page is reloaded.
+  runtimePromise.catch(() => {
+    runtimePromise = undefined;
+  });
   return runtimePromise;
 }
 
@@ -216,10 +236,7 @@ wireform_harness.graph.source
     self.postMessage({
       type: "failure",
       requestId: message.requestId,
-      message:
-        error instanceof Error
-          ? error.message.split("\n")[0]
-          : "WireViz could not render this harness.",
+      message: errorSummary(error),
     });
   }
 };

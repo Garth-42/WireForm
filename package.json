@@ -19,7 +19,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "npm run build && node --experimental-strip-types --test tests/static-build.test.mjs tests/project-data.test.mjs tests/wireviz-runtime.test.mjs",
+    "test": "npm run build && node --experimental-strip-types --test tests/static-build.test.mjs tests/project-data.test.mjs tests/wireviz-export.test.mjs tests/wireviz-runtime.test.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "vendor:verify": "node scripts/verify-vendor.mjs"

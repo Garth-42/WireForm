@@ -57,16 +57,19 @@ import {
   serializeTemplateSelection,
   type ComponentTemplate,
   type DuplicateMode,
+  MAX_LIBRARIES,
   type LibraryCollection,
 } from "./library";
 import {
   CABLE_KINDS,
   CONNECTOR_KINDS,
-  PROJECT_SCHEMA_VERSION,
+  MAX_ROWS,
+  cloneProject,
   componentGroup,
   createEmptyProject,
   makeComponent,
   parseProjectFile,
+  pruneLinks,
   serializeProjectFile,
   type ComponentKind,
   type HarnessComponent,
@@ -74,22 +77,27 @@ import {
   type PortRef,
   type TopologyLink,
 } from "./model";
+import { createStarterProject } from "./starter";
 import {
   AUTOSAVE_KEY,
   LIBRARIES_KEY,
+  LIBRARIES_RECOVERY_KEY,
   readLocalDocument,
   writeLocalDocument,
 } from "./storage";
+import { createId, listForCount } from "./util";
 import { WIREVIZ_VERSION } from "./vendor";
+import {
+  buildWireVizDocument,
+  canonicalEndpoint,
+  parsePortNumber,
+  usedEndpoints,
+  validateProject,
+} from "./wireviz-export";
 import {
   importWireVizYaml,
   type WireVizImportCandidate,
 } from "./wireviz-import";
-
-interface ValidationResult {
-  errors: string[];
-  warnings: string[];
-}
 
 interface DragState {
   ids: string[];
@@ -129,8 +137,53 @@ const NODE_WIDTH = 224;
 const NODE_HEADER = 62;
 const ROW_HEIGHT = 32;
 const NODE_PHOTO_HEIGHT = 118;
-const CANVAS_WIDTH = 1480;
-const CANVAS_HEIGHT = 820;
+const MIN_CANVAS_WIDTH = 1480;
+const MIN_CANVAS_HEIGHT = 820;
+const CANVAS_MARGIN = 12;
+// Room kept free beyond the outermost component so the canvas can keep growing.
+const CANVAS_GROW_PADDING = 160;
+// Matches the largest coordinate a saved project may contain (see model.ts).
+const MAX_COORDINATE = 20_000;
+// Consecutive edits to the same field within this window share one undo step.
+const UNDO_COALESCE_MS = 1_500;
+
+interface PreviewImage {
+  designator: string;
+  dataUrl: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  width: number;
+  height: number;
+  caption: string;
+}
+
+function samePreviewImages(a: PreviewImage[], b: PreviewImage[]) {
+  return (
+    a.length === b.length &&
+    a.every(
+      (image, index) =>
+        image.designator === b[index].designator &&
+        image.width === b[index].width &&
+        image.height === b[index].height &&
+        image.dataUrl === b[index].dataUrl,
+    )
+  );
+}
+
+/** Keeps a group of components inside the canvas while it is moved. */
+function clampOffset(
+  components: HarnessComponent[],
+  rawDx: number,
+  rawDy: number,
+) {
+  const minX = Math.min(...components.map((component) => component.x));
+  const minY = Math.min(...components.map((component) => component.y));
+  const maxX = Math.max(...components.map((component) => component.x));
+  const maxY = Math.max(...components.map((component) => component.y));
+  return {
+    dx: Math.min(MAX_COORDINATE - maxX, Math.max(CANVAS_MARGIN - minX, rawDx)),
+    dy: Math.min(MAX_COORDINATE - maxY, Math.max(CANVAS_MARGIN - minY, rawDy)),
+  };
+}
 
 const COLOR_OPTIONS = [
   { code: "BK", name: "Black", hex: "#25292d" },
@@ -194,138 +247,10 @@ const KIND_META: Record<
   },
 };
 
-function createStarterProject(): HarnessProject {
-  const components: HarnessComponent[] = [
-    {
-      id: "connector-controller",
-      kind: "connector",
-      designator: "J1",
-      name: "Controller",
-      x: 90,
-      y: 145,
-      pinCount: 3,
-      wireCount: 0,
-      pinLabels: ["V+", "CAN_H", "CAN_L"],
-      wireLabels: [],
-      colors: [],
-      gauge: "",
-      length: "",
-      shield: false,
-      loops: "",
-      manufacturer: "",
-      mpn: "",
-      supplier: "",
-      spn: "",
-      notes: "Main controller interface",
-    },
-    {
-      id: "cable-main",
-      kind: "cable",
-      designator: "W1",
-      name: "Main trunk",
-      x: 470,
-      y: 145,
-      pinCount: 0,
-      wireCount: 3,
-      pinLabels: [],
-      wireLabels: ["POWER", "CAN_H", "CAN_L"],
-      colors: ["RD", "WHGN", "WHBU"],
-      gauge: "22 AWG",
-      length: "0.8 m",
-      shield: true,
-      loops: "",
-      manufacturer: "",
-      mpn: "",
-      supplier: "",
-      spn: "",
-      notes: "Shielded CAN and power cable",
-    },
-    {
-      id: "connector-sensor",
-      kind: "connector",
-      designator: "J2",
-      name: "Sensor",
-      x: 850,
-      y: 145,
-      pinCount: 3,
-      wireCount: 0,
-      pinLabels: ["V+", "CAN_H", "CAN_L"],
-      wireLabels: [],
-      colors: [],
-      gauge: "",
-      length: "",
-      shield: false,
-      loops: "",
-      manufacturer: "",
-      mpn: "",
-      supplier: "",
-      spn: "",
-      notes: "Remote sensor connector",
-    },
-  ];
-
-  const links: TopologyLink[] = [];
-  for (let index = 1; index <= 3; index += 1) {
-    links.push(
-      {
-        id: `link-j1-w1-${index}`,
-        from: {
-          nodeId: "connector-controller",
-          portId: `pin:${index}`,
-          side: "right",
-        },
-        to: {
-          nodeId: "cable-main",
-          portId: `wire:${index}`,
-          side: "left",
-        },
-      },
-      {
-        id: `link-w1-j2-${index}`,
-        from: {
-          nodeId: "cable-main",
-          portId: `wire:${index}`,
-          side: "right",
-        },
-        to: {
-          nodeId: "connector-sensor",
-          portId: `pin:${index}`,
-          side: "left",
-        },
-      },
-    );
-  }
-
-  return {
-    schemaVersion: PROJECT_SCHEMA_VERSION,
-    projectId: "project-starter",
-    title: "CAN Sensor Harness",
-    revision: "A",
-    company: "",
-    components,
-    links,
-  };
-}
-
-function cloneProject(project: HarnessProject): HarnessProject {
-  return structuredClone(project);
-}
-
-function listForCount(values: string[], count: number, fallback: string) {
-  return Array.from({ length: count }, (_, index) => values[index] ?? fallback);
-}
-
 function wireColor(code: string) {
   return (
     COLOR_OPTIONS.find((option) => option.code === code)?.hex ?? "#70808c"
   );
-}
-
-function naturalSort(a: string, b: string) {
-  return a.localeCompare(b, undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
 }
 
 function getNodeRows(node: HarnessComponent) {
@@ -342,18 +267,6 @@ function getNodeHeight(node: HarnessComponent) {
   );
 }
 
-function parsePortNumber(portId: string) {
-  const [, value] = portId.split(":");
-  return Number(value);
-}
-
-function canonicalEndpoint(port: PortRef) {
-  const nodePort = port.portId.startsWith("pin:")
-    ? port.portId
-    : `${port.portId}:${port.side}`;
-  return `${port.nodeId}/${nodePort}`;
-}
-
 function nodePoint(node: HarnessComponent, port: PortRef) {
   const isShield = port.portId === "shield";
   const index = isShield ? node.wireCount : parsePortNumber(port.portId) - 1;
@@ -366,234 +279,6 @@ function nodePoint(node: HarnessComponent, port: PortRef) {
       index * ROW_HEIGHT +
       ROW_HEIGHT / 2,
   };
-}
-
-function oppositePort(link: TopologyLink, nodeId: string) {
-  return link.from.nodeId === nodeId ? link.to : link.from;
-}
-
-function isPortUsed(project: HarnessProject, port: PortRef) {
-  const canonical = canonicalEndpoint(port);
-  return project.links.some(
-    (link) =>
-      canonicalEndpoint(link.from) === canonical ||
-      canonicalEndpoint(link.to) === canonical,
-  );
-}
-
-function parseLoops(value: string, pinCount: number) {
-  return value
-    .split(",")
-    .map((pair) =>
-      pair
-        .trim()
-        .split("-")
-        .map((pin) => Number(pin.trim())),
-    )
-    .filter(
-      (pair) =>
-        pair.length === 2 &&
-        pair.every((pin) => Number.isInteger(pin) && pin > 0 && pin <= pinCount),
-    );
-}
-
-function buildWireVizDocument(project: HarnessProject) {
-  const connectorNodes = project.components
-    .filter((node) => CONNECTOR_KINDS.includes(node.kind))
-    .sort((a, b) => naturalSort(a.designator, b.designator));
-  const cableNodes = project.components
-    .filter((node) => CABLE_KINDS.includes(node.kind))
-    .sort((a, b) => naturalSort(a.designator, b.designator));
-
-  const connectors: Record<string, Record<string, unknown>> = {};
-  for (const node of connectorNodes) {
-    const connector: Record<string, unknown> = {
-      type:
-        node.kind === "splice"
-          ? node.name || "Splice"
-          : node.kind === "junction"
-            ? node.name || "Junction"
-            : node.name || "Connector",
-      pincount: node.pinCount,
-    };
-    const labels = listForCount(node.pinLabels, node.pinCount, "");
-    if (labels.some(Boolean)) connector.pinlabels = labels;
-
-    const explicitLoops = parseLoops(node.loops, node.pinCount);
-    const commonLoops =
-      node.kind === "splice" || node.kind === "junction"
-        ? Array.from({ length: Math.max(node.pinCount - 1, 0) }, (_, index) => [
-            index + 1,
-            index + 2,
-          ])
-        : [];
-    const loops = explicitLoops.length ? explicitLoops : commonLoops;
-    if (loops.length) connector.loops = loops;
-    if (node.kind !== "connector") {
-      connector.style = "simple";
-      connector.show_name = true;
-      connector.show_pincount = false;
-    }
-    if (node.manufacturer) connector.manufacturer = node.manufacturer;
-    if (node.mpn) connector.mpn = node.mpn;
-    if (node.supplier) connector.supplier = node.supplier;
-    if (node.spn) connector.spn = node.spn;
-    if (node.notes) connector.notes = node.notes;
-    connectors[node.designator] = connector;
-  }
-
-  const cables: Record<string, Record<string, unknown>> = {};
-  for (const node of cableNodes) {
-    const cable: Record<string, unknown> = {
-      wirecount: node.wireCount,
-    };
-    if (node.kind === "bundle") cable.category = "bundle";
-    if (node.name) cable.type = node.name;
-    if (node.gauge) cable.gauge = node.gauge;
-    if (node.length) cable.length = node.length;
-    const colors = listForCount(node.colors, node.wireCount, "BK");
-    if (colors.length) cable.colors = colors;
-    const labels = listForCount(node.wireLabels, node.wireCount, "");
-    if (labels.some(Boolean)) cable.wirelabels = labels;
-    if (node.shield) cable.shield = true;
-    if (node.manufacturer) cable.manufacturer = node.manufacturer;
-    if (node.mpn) cable.mpn = node.mpn;
-    if (node.supplier) cable.supplier = node.supplier;
-    if (node.spn) cable.spn = node.spn;
-    if (node.notes) cable.notes = node.notes;
-    cables[node.designator] = cable;
-  }
-
-  const connections: Array<Array<Record<string, string | number>>> = [];
-  for (const cable of cableNodes) {
-    for (let conductor = 1; conductor <= cable.wireCount; conductor += 1) {
-      const path: Array<Record<string, string | number>> = [];
-      const left = project.links.find(
-        (link) =>
-          [link.from, link.to].some(
-            (port) =>
-              port.nodeId === cable.id &&
-              port.portId === `wire:${conductor}` &&
-              port.side === "left",
-          ),
-      );
-      const right = project.links.find(
-        (link) =>
-          [link.from, link.to].some(
-            (port) =>
-              port.nodeId === cable.id &&
-              port.portId === `wire:${conductor}` &&
-              port.side === "right",
-          ),
-      );
-
-      if (left) {
-        const other = oppositePort(left, cable.id);
-        const node = project.components.find(
-          (component) => component.id === other.nodeId,
-        );
-        if (node) path.push({ [node.designator]: parsePortNumber(other.portId) });
-      }
-      if (left || right) path.push({ [cable.designator]: conductor });
-      if (right) {
-        const other = oppositePort(right, cable.id);
-        const node = project.components.find(
-          (component) => component.id === other.nodeId,
-        );
-        if (node) path.push({ [node.designator]: parsePortNumber(other.portId) });
-      }
-      if (path.length >= 2) connections.push(path);
-    }
-
-    if (cable.shield) {
-      const shieldLinks = project.links.filter((link) =>
-        [link.from, link.to].some(
-          (port) => port.nodeId === cable.id && port.portId === "shield",
-        ),
-      );
-      for (const link of shieldLinks) {
-        const other = oppositePort(link, cable.id);
-        const node = project.components.find(
-          (component) => component.id === other.nodeId,
-        );
-        if (node) {
-          const shieldEntry = { [cable.designator]: "s" };
-          const connectorEntry = {
-            [node.designator]: parsePortNumber(other.portId),
-          };
-          connections.push(
-            other.side === "left"
-              ? [connectorEntry, shieldEntry]
-              : [shieldEntry, connectorEntry],
-          );
-        }
-      }
-    }
-  }
-
-  return {
-    metadata: {
-      title: project.title,
-      ...(project.company ? { company: project.company } : {}),
-      ...(project.revision ? { revision: project.revision } : {}),
-    },
-    options: {
-      mini_bom_mode: true,
-    },
-    connectors,
-    cables,
-    connections,
-  };
-}
-
-function validateProject(project: HarnessProject): ValidationResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-  const designators = new Map<string, number>();
-
-  for (const node of project.components) {
-    const designator = node.designator.trim();
-    designators.set(designator, (designators.get(designator) ?? 0) + 1);
-    if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(designator)) {
-      errors.push(`${node.name || node.kind} has an invalid designator.`);
-    }
-    if (CONNECTOR_KINDS.includes(node.kind) && node.pinCount < 1) {
-      errors.push(`${node.designator} needs at least one pin.`);
-    }
-    if (CABLE_KINDS.includes(node.kind) && node.wireCount < 1) {
-      errors.push(`${node.designator} needs at least one conductor.`);
-    }
-  }
-
-  for (const [designator, count] of designators) {
-    if (count > 1) errors.push(`Designator ${designator} is used more than once.`);
-  }
-
-  if (!project.title.trim()) errors.push("Harness title is required.");
-  if (project.components.length === 0) warnings.push("The canvas is empty.");
-  if (project.links.length === 0) warnings.push("The harness has no connections.");
-
-  for (const node of project.components.filter((component) =>
-    CABLE_KINDS.includes(component.kind),
-  )) {
-    for (let conductor = 1; conductor <= node.wireCount; conductor += 1) {
-      const connectedSides = ["left", "right"].filter((side) =>
-        project.links.some((link) =>
-          [link.from, link.to].some(
-            (port) =>
-              port.nodeId === node.id &&
-              port.portId === `wire:${conductor}` &&
-              port.side === side,
-          ),
-        ),
-      );
-      if (connectedSides.length === 1) {
-        warnings.push(`${node.designator} conductor ${conductor} has an open end.`);
-      }
-    }
-  }
-
-  return { errors, warnings };
 }
 
 function makeNode(kind: ComponentKind, index: number): HarnessComponent {
@@ -676,6 +361,11 @@ export function HarnessStudio() {
     useState<DuplicateMode>("keep");
   const [importCandidate, setImportCandidate] =
     useState<WireVizImportCandidate | null>(null);
+  const lastCommitRef = useRef<{ key: string; at: number } | null>(null);
+  const lastPreviewRef = useRef<{
+    yaml: string;
+    images: PreviewImage[];
+  } | null>(null);
   const pastRef = useRef<HarnessProject[]>([]);
   const futureRef = useRef<HarnessProject[]>([]);
   const workerRef = useRef<Worker | null>(null);
@@ -709,7 +399,37 @@ export function HarnessStudio() {
       )}`,
     [wirevizDocument],
   );
-  const previewImages = useMemo(
+  const usedPorts = useMemo(
+    () => usedEndpoints(project.links),
+    [project.links],
+  );
+  const nodesById = useMemo(
+    () =>
+      new Map(project.components.map((component) => [component.id, component])),
+    [project.components],
+  );
+  // The canvas grows with its contents so imported or tall components are
+  // never stranded outside the drawable area.
+  const canvasSize = useMemo(
+    () => ({
+      width: Math.max(
+        MIN_CANVAS_WIDTH,
+        ...project.components.map(
+          (component) => component.x + NODE_WIDTH + CANVAS_GROW_PADDING,
+        ),
+      ),
+      height: Math.max(
+        MIN_CANVAS_HEIGHT,
+        ...project.components.map(
+          (component) =>
+            component.y + getNodeHeight(component) + CANVAS_GROW_PADDING,
+        ),
+      ),
+    }),
+    [project.components],
+  );
+  const modalOpen = libraryOpen || importCandidate !== null;
+  const previewImages = useMemo<PreviewImage[]>(
     () =>
       project.components.flatMap((component) =>
         component.kind === "connector" && component.photo
@@ -729,9 +449,24 @@ export function HarnessStudio() {
   );
 
   const commitProject = useCallback(
-    (next: HarnessProject, message?: string) => {
-      pastRef.current.push(cloneProject(project));
-      if (pastRef.current.length > 80) pastRef.current.shift();
+    (next: HarnessProject, message?: string, coalesceKey?: string) => {
+      // Typing in a field commits on every keystroke. Edits that share a
+      // coalesce key and arrive in quick succession reuse the undo step that
+      // the first of them created instead of adding one per character.
+      const now = Date.now();
+      const last = lastCommitRef.current;
+      const coalesce =
+        coalesceKey !== undefined &&
+        last !== null &&
+        last.key === coalesceKey &&
+        now - last.at < UNDO_COALESCE_MS &&
+        pastRef.current.length > 0;
+      if (!coalesce) {
+        pastRef.current.push(cloneProject(project));
+        if (pastRef.current.length > 80) pastRef.current.shift();
+      }
+      lastCommitRef.current =
+        coalesceKey !== undefined ? { key: coalesceKey, at: now } : null;
       futureRef.current = [];
       setHistoryState({ canUndo: true, canRedo: false });
       setProject(next);
@@ -742,10 +477,14 @@ export function HarnessStudio() {
   );
 
   const updateProject = useCallback(
-    (mutate: (draft: HarnessProject) => void, message?: string) => {
+    (
+      mutate: (draft: HarnessProject) => void,
+      message?: string,
+      coalesceKey?: string,
+    ) => {
       const next = cloneProject(project);
       mutate(next);
-      commitProject(next, message);
+      commitProject(next, message, coalesceKey);
     },
     [commitProject, project],
   );
@@ -753,6 +492,7 @@ export function HarnessStudio() {
   const undo = useCallback(() => {
     const previous = pastRef.current.pop();
     if (!previous) return;
+    lastCommitRef.current = null;
     futureRef.current.push(cloneProject(project));
     setProject(previous);
     setDirty(true);
@@ -767,6 +507,7 @@ export function HarnessStudio() {
   const redo = useCallback(() => {
     const next = futureRef.current.pop();
     if (!next) return;
+    lastCommitRef.current = null;
     pastRef.current.push(cloneProject(project));
     setProject(next);
     setDirty(true);
@@ -814,24 +555,7 @@ export function HarnessStudio() {
       idMap.set(component.id, `${idPrefix}-${index}`);
     });
 
-    const minX = Math.min(...clipboard.components.map((component) => component.x));
-    const minY = Math.min(...clipboard.components.map((component) => component.y));
-    const maxX = Math.max(
-      ...clipboard.components.map((component) => component.x + NODE_WIDTH),
-    );
-    const maxY = Math.max(
-      ...clipboard.components.map(
-        (component) => component.y + getNodeHeight(component),
-      ),
-    );
-    const dx = Math.min(
-      CANVAS_WIDTH - 12 - maxX,
-      Math.max(12 - minX, offset),
-    );
-    const dy = Math.min(
-      CANVAS_HEIGHT - 12 - maxY,
-      Math.max(12 - minY, offset),
-    );
+    const { dx, dy } = clampOffset(clipboard.components, offset, offset);
     const usedDesignators = new Set(
       project.components.map((component) => component.designator),
     );
@@ -876,6 +600,7 @@ export function HarnessStudio() {
     (next: HarnessProject, message: string, markDirty = false) => {
       pastRef.current = [];
       futureRef.current = [];
+      lastCommitRef.current = null;
       setHistoryState({ canUndo: false, canRedo: false });
       setProject(next);
       const firstId = next.components[0]?.id ?? null;
@@ -910,7 +635,20 @@ export function HarnessStudio() {
           );
         }
       }
-      setLibraries(normalizeLibraryCollection(storedLibraries));
+      if (storedLibraries !== undefined) {
+        try {
+          setLibraries(normalizeLibraryCollection(storedLibraries));
+        } catch {
+          // Never overwrite libraries this release cannot read: keep a copy
+          // under a separate key before starting a fresh collection.
+          void writeLocalDocument(LIBRARIES_RECOVERY_KEY, storedLibraries).catch(
+            () => undefined,
+          );
+          setNotice(
+            "Stored user libraries could not be read. A copy was kept in this browser and a new empty library was started.",
+          );
+        }
+      }
       setStorageReady(true);
       setLibrariesReady(true);
       setAutosaveStatus("saved");
@@ -958,6 +696,14 @@ export function HarnessStudio() {
         target?.tagName === "INPUT" ||
         target?.tagName === "TEXTAREA" ||
         target?.tagName === "SELECT";
+      // While a dialog is open the canvas shortcuts are off; Escape closes it.
+      if (modalOpen) {
+        if (event.key === "Escape") {
+          setLibraryOpen(false);
+          setImportCandidate(null);
+        }
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) redo();
@@ -1011,6 +757,7 @@ export function HarnessStudio() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     copySelection,
+    modalOpen,
     pasteSelection,
     redo,
     selectOnly,
@@ -1041,11 +788,14 @@ export function HarnessStudio() {
         setPreviewStatus("ready");
         setPreviewMessage("Preview rendered locally from WireViz DOT.");
       } else if (message.type === "failure") {
+        // Forget the last request so the next change retries the render.
+        lastPreviewRef.current = null;
         setPreviewStatus("error");
         setPreviewMessage(message.message || "WireViz could not render this harness.");
       }
     };
     worker.onerror = () => {
+      lastPreviewRef.current = null;
       setPreviewStatus("error");
       setPreviewMessage("The local rendering worker stopped unexpectedly.");
     };
@@ -1056,9 +806,20 @@ export function HarnessStudio() {
   }, []);
 
   useEffect(() => {
+    // Moving components changes the project but not the generated YAML, so
+    // skip the (expensive) WireViz render unless the output really changed.
+    const last = lastPreviewRef.current;
+    if (
+      last &&
+      last.yaml === yaml &&
+      samePreviewImages(last.images, previewImages)
+    ) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       const worker = workerRef.current;
       if (!worker) return;
+      lastPreviewRef.current = { yaml, images: previewImages };
       previewRequestRef.current += 1;
       const requestId = `preview-${previewRequestRef.current.toString()}`;
       setPreviewStatus((status) => {
@@ -1078,28 +839,48 @@ export function HarnessStudio() {
       });
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [previewImages, wirevizDocument]);
+  }, [previewImages, wirevizDocument, yaml]);
 
   const updateSelected = (
     patch: Partial<HarnessComponent>,
     message?: string,
   ) => {
     if (!selectedId) return;
-    updateProject(
-      (draft) => {
-        const node = draft.components.find(
-          (component) => component.id === selectedId,
-        );
-        if (!node) return;
-        Object.assign(node, patch);
-      },
+    const next = cloneProject(project);
+    const node = next.components.find(
+      (component) => component.id === selectedId,
+    );
+    if (!node) return;
+    Object.assign(node, patch);
+    // Shrinking a component, removing its shield, or changing its type can
+    // leave links pointing at ports that no longer exist.
+    const removed = pruneLinks(next);
+    if (removed > 0) {
+      setPendingPort(null);
+      commitProject(
+        next,
+        `Removed ${removed} connection${
+          removed === 1 ? "" : "s"
+        } that no longer had a matching pin or conductor.`,
+      );
+      return;
+    }
+    commitProject(
+      next,
       message,
+      // Plain field edits (no status message) share an undo step while typing.
+      message === undefined
+        ? `${selectedId}:${Object.keys(patch).sort().join(",")}`
+        : undefined,
     );
   };
 
   const updateCount = (count: number) => {
     if (!selected) return;
-    const nextCount = Math.max(1, Math.min(64, Number.isFinite(count) ? count : 1));
+    const nextCount = Math.max(
+      1,
+      Math.min(MAX_ROWS, Number.isFinite(count) ? Math.round(count) : 1),
+    );
     if (CONNECTOR_KINDS.includes(selected.kind)) {
       updateSelected({
         pinCount: nextCount,
@@ -1155,8 +936,10 @@ export function HarnessStudio() {
   };
 
   const connectPort = (port: PortRef) => {
-    if (isPortUsed(project, port)) {
-      setNotice("That port is already connected. Remove its link before reconnecting.");
+    if (usedPorts.has(canonicalEndpoint(port))) {
+      setNotice(
+        "That side of the port is already connected. Remove its link before reconnecting.",
+      );
       return;
     }
     if (!pendingPort) {
@@ -1182,7 +965,7 @@ export function HarnessStudio() {
     updateProject(
       (draft) => {
         draft.links.push({
-          id: `link-${Date.now().toString(36)}`,
+          id: createId("link"),
           from: pendingPort,
           to: port,
         });
@@ -1239,24 +1022,7 @@ export function HarnessStudio() {
     const draggedNodes = drag.before.components.filter((component) =>
       drag.ids.includes(component.id),
     );
-    const minX = Math.min(...draggedNodes.map((component) => component.x));
-    const minY = Math.min(...draggedNodes.map((component) => component.y));
-    const maxX = Math.max(
-      ...draggedNodes.map((component) => component.x + NODE_WIDTH),
-    );
-    const maxY = Math.max(
-      ...draggedNodes.map(
-        (component) => component.y + getNodeHeight(component),
-      ),
-    );
-    const dx = Math.min(
-      CANVAS_WIDTH - 12 - maxX,
-      Math.max(12 - minX, rawDx),
-    );
-    const dy = Math.min(
-      CANVAS_HEIGHT - 12 - maxY,
-      Math.max(12 - minY, rawDy),
-    );
+    const { dx, dy } = clampOffset(draggedNodes, rawDx, rawDy);
     setProject((current) => ({
       ...current,
       components: current.components.map((component) =>
@@ -1278,6 +1044,8 @@ export function HarnessStudio() {
     }
     if (dragDidMoveRef.current) {
       pastRef.current.push(drag.before);
+      if (pastRef.current.length > 80) pastRef.current.shift();
+      lastCommitRef.current = null;
       futureRef.current = [];
       setHistoryState({ canUndo: true, canRedo: false });
       setDirty(true);
@@ -1463,6 +1231,20 @@ export function HarnessStudio() {
     setNotice("WireViz YAML downloaded.");
   };
 
+  const copyYaml = () => {
+    if (validation.errors.length) {
+      setNotice("Resolve validation errors before copying YAML.");
+      return;
+    }
+    navigator.clipboard.writeText(yaml).then(
+      () => setNotice("YAML copied to the clipboard."),
+      () =>
+        setNotice(
+          "The browser blocked clipboard access. Use Download YAML instead.",
+        ),
+    );
+  };
+
   const addSelectionToLibrary = () => {
     if (!activeLibrary || selectedIds.length === 0) return;
     const selectedSet = new Set(selectedIds);
@@ -1563,8 +1345,10 @@ export function HarnessStudio() {
       setNotice("Enter a name for the new user library.");
       return;
     }
-    if (libraries.libraries.length >= 50) {
-      setNotice("A browser profile may contain at most 50 user libraries.");
+    if (libraries.libraries.length >= MAX_LIBRARIES) {
+      setNotice(
+        `A browser profile may contain at most ${MAX_LIBRARIES} user libraries.`,
+      );
       return;
     }
     const library = createLibrary(name);
@@ -1736,9 +1520,13 @@ export function HarnessStudio() {
             <input
               value={project.title}
               onChange={(event) =>
-                updateProject((draft) => {
-                  draft.title = event.target.value;
-                })
+                updateProject(
+                  (draft) => {
+                    draft.title = event.target.value;
+                  },
+                  undefined,
+                  "project:title",
+                )
               }
               className="title-input"
             />
@@ -1988,15 +1776,15 @@ export function HarnessStudio() {
             <div
               className="canvas-zoom"
               style={{
-                width: CANVAS_WIDTH * zoom,
-                height: CANVAS_HEIGHT * zoom,
+                width: canvasSize.width * zoom,
+                height: canvasSize.height * zoom,
               }}
             >
               <div
                 className="canvas"
                 style={{
-                  width: CANVAS_WIDTH,
-                  height: CANVAS_HEIGHT,
+                  width: canvasSize.width,
+                  height: canvasSize.height,
                   transform: `scale(${zoom})`,
                 }}
                 onPointerDown={onCanvasPointerDown}
@@ -2006,17 +1794,13 @@ export function HarnessStudio() {
               >
                 <svg
                   className="link-layer"
-                  width={CANVAS_WIDTH}
-                  height={CANVAS_HEIGHT}
+                  width={canvasSize.width}
+                  height={canvasSize.height}
                   aria-label="Harness connections"
                 >
                   {project.links.map((link) => {
-                    const fromNode = project.components.find(
-                      (node) => node.id === link.from.nodeId,
-                    );
-                    const toNode = project.components.find(
-                      (node) => node.id === link.to.nodeId,
-                    );
+                    const fromNode = nodesById.get(link.from.nodeId);
+                    const toNode = nodesById.get(link.to.nodeId);
                     if (!fromNode || !toNode) return null;
                     const from = nodePoint(fromNode, link.from);
                     const to = nodePoint(toNode, link.to);
@@ -2173,11 +1957,13 @@ export function HarnessStudio() {
                                     ? "pending"
                                     : ""
                                 } ${
-                                  isPortUsed(project, {
-                                    nodeId: node.id,
-                                    portId,
-                                    side: "left",
-                                  })
+                                  usedPorts.has(
+                                    canonicalEndpoint({
+                                      nodeId: node.id,
+                                      portId,
+                                      side: "left",
+                                    }),
+                                  )
                                     ? "used"
                                     : ""
                                 }`}
@@ -2223,11 +2009,13 @@ export function HarnessStudio() {
                                     ? "pending"
                                     : ""
                                 } ${
-                                  isPortUsed(project, {
-                                    nodeId: node.id,
-                                    portId,
-                                    side: "right",
-                                  })
+                                  usedPorts.has(
+                                    canonicalEndpoint({
+                                      nodeId: node.id,
+                                      portId,
+                                      side: "right",
+                                    }),
+                                  )
                                     ? "used"
                                     : ""
                                 }`}
@@ -2311,9 +2099,13 @@ export function HarnessStudio() {
                   <input
                     value={project.title}
                     onChange={(event) =>
-                      updateProject((draft) => {
-                        draft.title = event.target.value;
-                      })
+                      updateProject(
+                        (draft) => {
+                          draft.title = event.target.value;
+                        },
+                        undefined,
+                        "project:title",
+                      )
                     }
                   />
                 </Field>
@@ -2322,9 +2114,13 @@ export function HarnessStudio() {
                     <input
                       value={project.revision}
                       onChange={(event) =>
-                        updateProject((draft) => {
+                      updateProject(
+                        (draft) => {
                           draft.revision = event.target.value;
-                        })
+                        },
+                        undefined,
+                        "project:revision",
+                      )
                       }
                     />
                   </Field>
@@ -2332,9 +2128,13 @@ export function HarnessStudio() {
                     <input
                       value={project.company}
                       onChange={(event) =>
-                        updateProject((draft) => {
+                      updateProject(
+                        (draft) => {
                           draft.company = event.target.value;
-                        })
+                        },
+                        undefined,
+                        "project:company",
+                      )
                       }
                     />
                   </Field>
@@ -2391,24 +2191,37 @@ export function HarnessStudio() {
                             const changingGroup =
                               componentGroup(kind) !==
                               componentGroup(selected.kind);
+                            const pinCount = !CONNECTOR_KINDS.includes(kind)
+                              ? 0
+                              : changingGroup
+                                ? 4
+                                : selected.pinCount;
+                            const wireCount = !CABLE_KINDS.includes(kind)
+                              ? 0
+                              : changingGroup
+                                ? kind === "wire"
+                                  ? 1
+                                  : 4
+                                : selected.wireCount;
                             updateSelected({
                               kind,
                               photo:
                                 kind === "connector"
                                   ? selected.photo
                                   : undefined,
-                              pinCount: CONNECTOR_KINDS.includes(kind)
-                                ? changingGroup
-                                  ? 4
-                                  : selected.pinCount
-                                : 0,
-                              wireCount: CABLE_KINDS.includes(kind)
-                                ? changingGroup
-                                  ? kind === "wire"
-                                    ? 1
-                                    : 4
-                                  : selected.wireCount
-                                : 0,
+                              pinCount,
+                              wireCount,
+                              // Switching between connector and cable types
+                              // starts from clean rows for the new type.
+                              ...(changingGroup
+                                ? {
+                                    pinLabels: listForCount([], pinCount, ""),
+                                    wireLabels: listForCount([], wireCount, ""),
+                                    colors: listForCount([], wireCount, "BK"),
+                                    shield: false,
+                                    loops: "",
+                                  }
+                                : {}),
                             });
                           }}
                         >
@@ -2806,10 +2619,7 @@ export function HarnessStudio() {
             <div className="yaml-header">
               <span>{filenameFor(project.title)}.yml</span>
               <button
-                onClick={() => {
-                  void navigator.clipboard.writeText(yaml);
-                  setNotice("YAML copied to the clipboard.");
-                }}
+                onClick={copyYaml}
               >
                 Copy YAML
               </button>

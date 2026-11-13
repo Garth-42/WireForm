@@ -1,10 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: ["main"]
   pull_request:
     branches: ["main"]
+  # Pushes to main are verified through the Pages workflow, which calls this
+  # workflow before it builds and deploys.
+  workflow_call:
 
 permissions:
   contents: read

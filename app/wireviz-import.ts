@@ -2,6 +2,9 @@ import YAML from "yaml";
 import {
   CABLE_KINDS,
   CONNECTOR_KINDS,
+  MAX_COMPONENTS,
+  MAX_LINKS,
+  MAX_ROWS,
   PROJECT_SCHEMA_VERSION,
   createEmptyProject,
   makeComponent,
@@ -11,6 +14,8 @@ import {
   type PortRef,
   type TopologyLink,
 } from "./model.ts";
+import { listForCount, recordValue } from "./util.ts";
+import { canonicalEndpoint } from "./wireviz-export.ts";
 
 export interface WireVizImportReport {
   fileName: string;
@@ -71,14 +76,9 @@ const SUPPORTED_CABLE_FIELDS = new Set([
   "spn",
   "notes",
   "image",
+  "gauge_unit",
+  "length_unit",
 ]);
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
-}
 
 function textValue(value: unknown, fallback = "") {
   if (value === null || value === undefined) return fallback;
@@ -91,18 +91,29 @@ function textValue(value: unknown, fallback = "") {
 function boundedCount(value: unknown, fallback: number) {
   const number = Number(value);
   return Number.isFinite(number)
-    ? Math.min(64, Math.max(1, Math.round(number)))
+    ? Math.min(MAX_ROWS, Math.max(1, Math.round(number)))
     : fallback;
 }
 
 function listValue(value: unknown) {
   return Array.isArray(value)
-    ? value.map((entry) => textValue(entry)).slice(0, 64)
+    ? value.map((entry) => textValue(entry)).slice(0, MAX_ROWS)
     : [];
 }
 
-function listForCount(values: string[], count: number, fallback: string) {
-  return Array.from({ length: count }, (_, index) => values[index] ?? fallback);
+/**
+ * WireViz stores gauge and length as a number plus an optional unit field.
+ * The editor keeps a single "number unit" text, so the two are joined here.
+ */
+function measureText(value: unknown, unit: unknown, defaultUnit: string) {
+  if (typeof value === "number") {
+    return `${value} ${textValue(unit) || defaultUnit}`;
+  }
+  const text = textValue(value).trim();
+  if (text && /^\d+(?:\.\d+)?$/.test(text)) {
+    return `${text} ${textValue(unit) || defaultUnit}`;
+  }
+  return text;
 }
 
 function stableId(prefix: string, designator: string, index: number) {
@@ -170,29 +181,36 @@ function selectorOrdinal(
   selector: string | number,
 ): number | undefined {
   const component = node.component;
-  const count = CONNECTOR_KINDS.includes(component.kind)
-    ? component.pinCount
-    : component.wireCount;
-  if (typeof selector === "number") {
-    return selector >= 1 && selector <= count ? selector : undefined;
-  }
-  const numeric = Number(selector);
-  if (Number.isInteger(numeric) && numeric >= 1 && numeric <= count) {
-    return numeric;
-  }
-  if (CONNECTOR_KINDS.includes(component.kind)) {
-    const pinIndex = node.pins?.findIndex((pin) => String(pin) === selector) ?? -1;
+  const isConnector = CONNECTOR_KINDS.includes(component.kind);
+  const count = isConnector ? component.pinCount : component.wireCount;
+  const text = String(selector);
+
+  // A connector with an explicit `pins:` list is addressed by those pin
+  // identifiers, not by position: with `pins: [3, 2, 1]`, pin 3 is row 1.
+  if (isConnector && node.pins?.length) {
+    const pinIndex = node.pins.findIndex((pin) => String(pin) === text);
     if (pinIndex >= 0) return pinIndex + 1;
-    const labelIndex = component.pinLabels.findIndex(
-      (label) => label === selector,
-    );
+  } else {
+    const numeric = typeof selector === "number" ? selector : Number(text);
+    if (
+      text.trim() !== "" &&
+      Number.isInteger(numeric) &&
+      numeric >= 1 &&
+      numeric <= count
+    ) {
+      return numeric;
+    }
+  }
+
+  if (isConnector) {
+    const labelIndex = component.pinLabels.findIndex((label) => label === text);
     return labelIndex >= 0 ? labelIndex + 1 : undefined;
   }
-  const labelIndex = component.wireLabels.findIndex(
-    (label) => label === selector,
-  );
+  const labelIndex = component.wireLabels.findIndex((label) => label === text);
   if (labelIndex >= 0) return labelIndex + 1;
-  const colorIndex = component.colors.findIndex((color) => color === selector);
+  const colorIndex = component.colors.findIndex(
+    (color) => color === text.toUpperCase(),
+  );
   return colorIndex >= 0 ? colorIndex + 1 : undefined;
 }
 
@@ -210,7 +228,7 @@ function importedConnector(
           typeof pin === "string" || typeof pin === "number" ? pin : "",
         )
         .filter((pin): pin is string | number => pin !== "")
-        .slice(0, 64)
+        .slice(0, MAX_ROWS)
     : undefined;
   const pinCount = boundedCount(
     attributes.pincount,
@@ -289,8 +307,8 @@ function importedCable(
   component.wireCount = wireCount;
   component.colors = listForCount(colors, wireCount, "BK");
   component.wireLabels = listForCount(wireLabels, wireCount, "");
-  component.gauge = textValue(attributes.gauge);
-  component.length = textValue(attributes.length);
+  component.gauge = measureText(attributes.gauge, attributes.gauge_unit, "mm2");
+  component.length = measureText(attributes.length, attributes.length_unit, "m");
   component.shield = Boolean(attributes.shield);
   component.manufacturer = textValue(attributes.manufacturer);
   component.mpn = textValue(attributes.mpn);
@@ -329,6 +347,7 @@ function portFor(
 
 function addLink(
   links: TopologyLink[],
+  used: Set<string>,
   fromNode: ImportedNode,
   fromSelector: string | number,
   toNode: ImportedNode,
@@ -375,19 +394,22 @@ function addLink(
     connectorOrdinal,
     cableIsFirst ? "left" : "right",
   );
-  const endpointKey = (port: PortRef) =>
-    `${port.nodeId}/${port.portId}/${
-      port.portId.startsWith("pin:") ? "" : port.side
-    }`;
-  const used = new Set(
-    links.flatMap((link) => [endpointKey(link.from), endpointKey(link.to)]),
-  );
-  if (used.has(endpointKey(cablePort)) || used.has(endpointKey(connectorPort))) {
+  const cableKey = canonicalEndpoint(cablePort);
+  const connectorKey = canonicalEndpoint(connectorPort);
+  if (used.has(cableKey) || used.has(connectorKey)) {
     report.unsupported.push(
-      `Connection ${fromNode.component.designator} → ${toNode.component.designator} reuses a port that is already connected.`,
+      `Connection ${fromNode.component.designator} → ${toNode.component.designator} reuses a port side that is already connected; each pin or conductor takes one connection per side.`,
     );
     return;
   }
+  if (links.length >= MAX_LINKS) {
+    report.unsupported.push(
+      `Only the first ${MAX_LINKS} connections were imported.`,
+    );
+    return;
+  }
+  used.add(cableKey);
+  used.add(connectorKey);
   links.push({
     id: `import-link-${links.length + 1}`,
     from: cableIsFirst ? cablePort : connectorPort,
@@ -447,8 +469,13 @@ export function importWireVizYaml(
   if (Object.keys(connectors).length + Object.keys(cables).length === 0) {
     throw new Error("No connectors or cables were found in this WireViz file.");
   }
-  if (Object.keys(connectors).length + Object.keys(cables).length > 500) {
-    throw new Error("WireViz imports may contain at most 500 components.");
+  if (
+    Object.keys(connectors).length + Object.keys(cables).length >
+    MAX_COMPONENTS
+  ) {
+    throw new Error(
+      `WireViz imports may contain at most ${MAX_COMPONENTS} components.`,
+    );
   }
 
   const metadata = recordValue(root.metadata) ?? {};
@@ -484,6 +511,7 @@ export function importWireVizYaml(
     );
   }
   const links: TopologyLink[] = [];
+  const usedEndpoints = new Set<string>();
   const sideHints = new Map<string, "left" | "right">();
   for (const [setIndex, setValue] of connectionSets.entries()) {
     if (!Array.isArray(setValue)) {
@@ -565,6 +593,7 @@ export function importWireVizYaml(
         }
         addLink(
           links,
+          usedEndpoints,
           fromNode,
           from.selector,
           toNode,

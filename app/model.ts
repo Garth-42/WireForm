@@ -1,3 +1,5 @@
+import { createId, numberValue, recordValue, textValue } from "./util.ts";
+
 export const PROJECT_SCHEMA_VERSION = 2 as const;
 export const PROJECT_FILE_FORMAT = "wireform-project";
 
@@ -89,33 +91,11 @@ const COMPONENT_KINDS = new Set<ComponentKind>([
   ...CONNECTOR_KINDS,
   ...CABLE_KINDS,
 ]);
-const MAX_COMPONENTS = 500;
-const MAX_LINKS = 4_000;
-const MAX_ROWS = 64;
+export const MAX_COMPONENTS = 500;
+export const MAX_LINKS = 4_000;
+export const MAX_ROWS = 64;
 const MAX_TEXT = 4_000;
 const MAX_PHOTO_DATA_LENGTH = 4_000_000;
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
-}
-
-function textValue(value: unknown, fallback = "", max = MAX_TEXT) {
-  return typeof value === "string" ? value.slice(0, max) : fallback;
-}
-
-function numberValue(
-  value: unknown,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-) {
-  const number = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.min(maximum, Math.max(minimum, number));
-}
 
 function stringList(value: unknown, maximum = MAX_ROWS) {
   if (!Array.isArray(value)) return [];
@@ -128,16 +108,7 @@ function stringList(value: unknown, maximum = MAX_ROWS) {
     );
 }
 
-function createId(prefix: string) {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 10)}`;
-}
-
-function normalizedPhoto(value: unknown): ConnectorPhoto | undefined {
+export function normalizedPhoto(value: unknown): ConnectorPhoto | undefined {
   const photo = recordValue(value);
   if (!photo) return undefined;
   if (
@@ -232,6 +203,59 @@ export function createEmptyProject(title = "Untitled Harness"): HarnessProject {
   };
 }
 
+/** True when `portId` names a pin, conductor, or shield the node really has. */
+export function portExists(node: HarnessComponent, portId: string) {
+  if (portId === "shield") {
+    return CABLE_KINDS.includes(node.kind) && node.shield;
+  }
+  const match = /^(pin|wire):([1-9][0-9]*)$/.exec(portId);
+  if (!match) return false;
+  const ordinal = Number(match[2]);
+  return match[1] === "pin"
+    ? CONNECTOR_KINDS.includes(node.kind) && ordinal <= node.pinCount
+    : CABLE_KINDS.includes(node.kind) && ordinal <= node.wireCount;
+}
+
+/**
+ * Removes links whose endpoints no longer exist, for example after a pin
+ * count was reduced, a shield was removed, or a component changed type.
+ * Returns how many links were removed.
+ */
+export function pruneLinks(project: HarnessProject) {
+  const nodes = new Map(
+    project.components.map((component) => [component.id, component]),
+  );
+  const before = project.links.length;
+  project.links = project.links.filter((link) =>
+    [link.from, link.to].every((port) => {
+      const node = nodes.get(port.nodeId);
+      return node ? portExists(node, port.portId) : false;
+    }),
+  );
+  return before - project.links.length;
+}
+
+/**
+ * Copies a project for undo history. Photos are shared by reference (they are
+ * never mutated in place), so history entries do not duplicate image data.
+ */
+export function cloneProject(project: HarnessProject): HarnessProject {
+  return {
+    ...project,
+    components: project.components.map((component) => ({
+      ...component,
+      pinLabels: [...component.pinLabels],
+      wireLabels: [...component.wireLabels],
+      colors: [...component.colors],
+    })),
+    links: project.links.map((link) => ({
+      ...link,
+      from: { ...link.from },
+      to: { ...link.to },
+    })),
+  };
+}
+
 function normalizeComponent(
   value: unknown,
   index: number,
@@ -288,23 +312,12 @@ function normalizePort(
   const nodeId = textValue(source?.nodeId, "", 240);
   const portId = textValue(source?.portId, "", 120);
   const side = source?.side;
+  const node = nodes.get(nodeId);
   if (
-    !nodes.has(nodeId) ||
-    !/^(?:pin|wire):[1-9][0-9]*$|^shield$/.test(portId) ||
-    (side !== "left" && side !== "right")
+    !node ||
+    (side !== "left" && side !== "right") ||
+    !portExists(node, portId)
   ) {
-    return undefined;
-  }
-  const node = nodes.get(nodeId)!;
-  if (portId.startsWith("pin:")) {
-    if (!CONNECTOR_KINDS.includes(node.kind)) return undefined;
-    const ordinal = Number(portId.slice("pin:".length));
-    if (ordinal > node.pinCount) return undefined;
-  } else if (portId.startsWith("wire:")) {
-    if (!CABLE_KINDS.includes(node.kind)) return undefined;
-    const ordinal = Number(portId.slice("wire:".length));
-    if (ordinal > node.wireCount) return undefined;
-  } else if (!CABLE_KINDS.includes(node.kind) || !node.shield) {
     return undefined;
   }
   return { nodeId, portId, side };

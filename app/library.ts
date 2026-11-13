@@ -1,13 +1,19 @@
 import {
   CABLE_KINDS,
   CONNECTOR_KINDS,
+  MAX_ROWS,
   makeComponent,
+  normalizedPhoto,
   type ComponentKind,
   type HarnessComponent,
 } from "./model.ts";
+import { createId, numberValue, recordValue, textValue } from "./util.ts";
 
 export const LIBRARY_COLLECTION_SCHEMA_VERSION = 1 as const;
+// The format name predates the WireForm rename and is kept so that existing
+// exported library files continue to open.
 export const LIBRARY_FILE_FORMAT = "wireviz-gui-component-library";
+export const LIBRARY_FILE_SCHEMA_VERSION = 2 as const;
 export const LIBRARY_BACKUP_FORMAT = "wireform-library-backup";
 
 export type DuplicateMode = "keep" | "replace" | "skip";
@@ -45,28 +51,8 @@ const COMPONENT_KINDS = new Set<ComponentKind>([
   ...CONNECTOR_KINDS,
   ...CABLE_KINDS,
 ]);
-const MAX_LIBRARIES = 50;
+export const MAX_LIBRARIES = 50;
 const MAX_TEMPLATES = 500;
-
-function createId(prefix: string) {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 10)}`;
-}
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
-}
-
-function textValue(value: unknown, fallback = "", max = 4_000) {
-  return typeof value === "string" ? value.slice(0, max) : fallback;
-}
 
 function now() {
   return new Date().toISOString();
@@ -179,6 +165,7 @@ export function mergeTemplates(
 function normalizedTemplate(
   value: unknown,
   index: number,
+  usedIds: Set<string>,
 ): ComponentTemplate | undefined {
   const source = recordValue(value);
   if (!source) return undefined;
@@ -187,41 +174,21 @@ function normalizedTemplate(
   if (!COMPONENT_KINDS.has(kind)) return undefined;
   const base = makeComponent(kind, index + 1);
   const pinCount = CONNECTOR_KINDS.includes(kind)
-    ? Math.min(64, Math.max(1, Number(componentSource.pinCount) || base.pinCount))
+    ? Math.round(numberValue(componentSource.pinCount, base.pinCount, 1, MAX_ROWS))
     : 0;
   const wireCount = CABLE_KINDS.includes(kind)
-    ? Math.min(64, Math.max(1, Number(componentSource.wireCount) || base.wireCount))
+    ? Math.round(
+        numberValue(componentSource.wireCount, base.wireCount, 1, MAX_ROWS),
+      )
     : 0;
-  const photoSource = recordValue(componentSource.photo);
-  const rawPhotoDataUrl = photoSource?.dataUrl;
-  const photoDataUrl =
-    typeof rawPhotoDataUrl === "string" && rawPhotoDataUrl.length <= 4_000_000
-      ? rawPhotoDataUrl
-      : "";
   const photo =
-    kind === "connector" &&
-    /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=\s]+$/.test(photoDataUrl)
-      ? {
-          dataUrl: photoDataUrl,
-          fileName: textValue(photoSource?.fileName, "connector-photo", 240),
-          mimeType: (
-            /^data:(image\/(?:jpeg|png|webp));/.exec(photoDataUrl)?.[1] ??
-            "image/jpeg"
-          ) as "image/jpeg" | "image/png" | "image/webp",
-          width: Math.min(
-            4_096,
-            Math.max(1, Number(photoSource?.width) || 320),
-          ),
-          height: Math.min(
-            4_096,
-            Math.max(1, Number(photoSource?.height) || 240),
-          ),
-          alt: textValue(photoSource?.alt, "Connector photo", 500),
-        }
-      : undefined;
+    kind === "connector" ? normalizedPhoto(componentSource.photo) : undefined;
+  let id = textValue(source.id, "", 240);
+  if (!id || usedIds.has(id)) id = createId("template");
+  usedIds.add(id);
   const timestamp = now();
   return {
-    id: textValue(source.id, createId("template"), 240),
+    id,
     name: textValue(
       source.name,
       textValue(componentSource.name, textValue(componentSource.designator, `Template ${index + 1}`)),
@@ -264,37 +231,58 @@ function normalizedTemplate(
   };
 }
 
-function normalizedLibrary(value: unknown, index: number): UserLibrary | undefined {
+function normalizedLibrary(
+  value: unknown,
+  index: number,
+  usedLibraryIds: Set<string>,
+): UserLibrary | undefined {
   const source = recordValue(value);
   if (!source || !Array.isArray(source.templates)) return undefined;
   const timestamp = now();
+  let id = textValue(source.id, "", 240);
+  if (!id || usedLibraryIds.has(id)) id = createId("library");
+  usedLibraryIds.add(id);
+  const usedTemplateIds = new Set<string>();
   return {
-    id: textValue(source.id, createId("library"), 240),
+    id,
     name: textValue(source.name, `Library ${index + 1}`, 240),
     version: textValue(source.version, "1.0.0", 80),
     templates: source.templates
       .slice(0, MAX_TEMPLATES)
-      .map(normalizedTemplate)
+      .map((template, templateIndex) =>
+        normalizedTemplate(template, templateIndex, usedTemplateIds),
+      )
       .filter((template): template is ComponentTemplate => Boolean(template)),
     createdAt: textValue(source.createdAt, timestamp, 80),
     updatedAt: textValue(source.updatedAt, timestamp, 80),
   };
 }
 
+/**
+ * Validates a stored or imported library collection.
+ *
+ * Throws when the data is not a collection this release understands. Callers
+ * must not treat that as "empty": silently substituting a blank collection
+ * would overwrite the user's real libraries on the next save.
+ */
 export function normalizeLibraryCollection(value: unknown): LibraryCollection {
   const source = recordValue(value);
-  if (
-    !source ||
-    source.schemaVersion !== LIBRARY_COLLECTION_SCHEMA_VERSION ||
-    !Array.isArray(source.libraries)
-  ) {
-    return createLibraryCollection();
+  if (!source || !Array.isArray(source.libraries)) {
+    throw new Error("The library collection is missing or damaged.");
   }
+  if (source.schemaVersion !== LIBRARY_COLLECTION_SCHEMA_VERSION) {
+    throw new Error(
+      `The library collection uses schema ${String(source.schemaVersion)}, but this WireForm release supports schema ${LIBRARY_COLLECTION_SCHEMA_VERSION}.`,
+    );
+  }
+  const usedLibraryIds = new Set<string>();
   const libraries = source.libraries
     .slice(0, MAX_LIBRARIES)
-    .map(normalizedLibrary)
+    .map((library, index) => normalizedLibrary(library, index, usedLibraryIds))
     .filter((library): library is UserLibrary => Boolean(library));
-  if (libraries.length === 0) return createLibraryCollection();
+  if (libraries.length === 0) {
+    throw new Error("The library collection does not contain any libraries.");
+  }
   const activeLibraryId = textValue(source.activeLibraryId);
   return {
     schemaVersion: LIBRARY_COLLECTION_SCHEMA_VERSION,
@@ -309,7 +297,7 @@ export function serializeLibrary(library: UserLibrary) {
   return JSON.stringify(
     {
       format: LIBRARY_FILE_FORMAT,
-      schemaVersion: 2,
+      schemaVersion: LIBRARY_FILE_SCHEMA_VERSION,
       library: {
         id: library.id,
         name: library.name,
@@ -361,16 +349,33 @@ export function parseLibraryFile(text: string):
   const source = recordValue(value);
   if (!source) throw new Error("The library file must contain a JSON object.");
   if (source.format === LIBRARY_BACKUP_FORMAT) {
-    return {
-      kind: "backup",
-      collection: normalizeLibraryCollection(source.collection),
-    };
+    try {
+      return {
+        kind: "backup",
+        collection: normalizeLibraryCollection(source.collection),
+      };
+    } catch (error) {
+      throw new Error(
+        `This backup could not be restored, so your libraries were left unchanged. ${
+          error instanceof Error ? error.message : ""
+        }`.trim(),
+        { cause: error },
+      );
+    }
   }
   if (
     source.format !== LIBRARY_FILE_FORMAT ||
     !Array.isArray(source.templates)
   ) {
     throw new Error("This is not a WireForm component library or backup.");
+  }
+  if (
+    typeof source.schemaVersion === "number" &&
+    source.schemaVersion > LIBRARY_FILE_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `This library file uses schema ${source.schemaVersion}, but this WireForm release supports schema ${LIBRARY_FILE_SCHEMA_VERSION}.`,
+    );
   }
   const metadata = recordValue(source.library) ?? {};
   const library = normalizedLibrary(
@@ -381,6 +386,7 @@ export function parseLibraryFile(text: string):
       templates: source.templates,
     },
     0,
+    new Set<string>(),
   );
   if (!library) throw new Error("The component library is invalid.");
   return { kind: "library", library };

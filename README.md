@@ -13,7 +13,8 @@ machine.
 
 - Draggable topology canvas with connectors, cables, individual wires, bundles,
   splices, and junctions
-- Explicit pin and conductor terminations
+- Explicit pin and conductor terminations; each pin or conductor takes one
+  connection per side, so a connector can sit in the middle of a daisy chain
 - Wire colors, labels, gauge, length, shields, loops, and BOM fields
 - Hold and drag to select multiple components
 - Move, copy, paste, and delete a component selection

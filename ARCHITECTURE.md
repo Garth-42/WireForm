@@ -578,10 +578,18 @@ No application backend is needed. For development, use the Vite development serv
 ```text
 /
 ├── app/
-│   ├── HarnessStudio.tsx
+│   ├── HarnessStudio.tsx      (editor UI and interaction state)
+│   ├── images.ts              (connector photo resizing)
+│   ├── library.ts             (user libraries and templates)
 │   ├── main.tsx
+│   ├── model.ts               (project schema, normalization, link pruning)
 │   ├── preview.worker.ts
-│   └── vendor.ts
+│   ├── starter.ts             (example harness)
+│   ├── storage.ts             (IndexedDB autosave with fallback)
+│   ├── util.ts                (shared parsing helpers)
+│   ├── vendor.ts
+│   ├── wireviz-export.ts      (YAML document builder and validation)
+│   └── wireviz-import.ts      (WireViz YAML importer)
 ├── docs/
 │   ├── images/
 │   └── plans/
@@ -593,7 +601,9 @@ No application backend is needed. For development, use the Vite development serv
 ├── scripts/
 │   └── verify-vendor.mjs
 ├── tests/
+│   ├── project-data.test.mjs
 │   ├── static-build.test.mjs
+│   ├── wireviz-export.test.mjs
 │   └── wireviz-runtime.test.mjs
 ├── vendor/
 │   └── manifest.json
